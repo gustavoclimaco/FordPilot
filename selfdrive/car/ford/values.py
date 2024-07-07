@@ -139,12 +139,20 @@ class CAR(Platforms):
       FordCarDocs("Ford Maverick 2022", "LARIAT Luxury", hybrid=True),
       FordCarDocs("Ford Maverick 2023-24", "Co-Pilot360 Assist", hybrid=True),
     ],
-    CarSpecs(mass=1650, wheelbase=3.076, steerRatio=17.0),
+    CarSpecs(mass=1650, wheelbase=3.076, steerRatio=17.0),  
   )
   MUSTANG_MACH_E_MK1 = FordCANFDPlatformConfig(
     "FORD MUSTANG MACH-E 1ST GEN",
     [FordCarDocs("Ford Mustang Mach-E 2021-23", "Co-Pilot360 Active 2.0")],
     CarSpecs(mass=2200, wheelbase=2.984, steerRatio=17.0),  # TODO: check steer ratio
+  )
+  FUSION_RT = FordPlatformConfig(
+    "FORD FUSION - RETROFITED",
+    [
+      FordCarDocs("Ford Fusion AWD 2016 - 2019", "Co-Pilot360 Assist"),
+      FordCarDocs("Ford Fusion Hybrid 2016 - 2019", "Co-Pilot360 Assist", hybrid=True),
+    ],
+    CarSpecs(mass=1691, wheelbase=2.85, steerRatio=16.7),
   )
 
 
