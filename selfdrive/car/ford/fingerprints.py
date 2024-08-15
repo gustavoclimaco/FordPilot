@@ -131,9 +131,10 @@ FW_VERSIONS = {
     ],
   },
   CAR.FORD_MAVERICK_MK1: {
-    (Ecu.eps, 0x730, None): [
+     (Ecu.eps, 0x730, None): [
       b'NZ6C-14D003-AK\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
       b'NZ6C-14D003-AL\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+      b'K2GC-14D003-AJ\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00', #STRATEGY_FUSION_HYBRID_AWD2017_PSCM
     ],
     (Ecu.abs, 0x760, None): [
       b'NZ6C-2D053-AE\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
@@ -141,12 +142,16 @@ FW_VERSIONS = {
       b'PZ6C-2D053-ED\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
       b'PZ6C-2D053-EE\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
       b'PZ6C-2D053-EF\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+      b'HG9C-2D053-AH\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00', #STRATEGY_FUSION_HYBRID_ABS
+      b'HG9C-2D053-MG\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00', #STRATEGY_FUSION_AWD2017_ABS
     ],
     (Ecu.fwdRadar, 0x764, None): [
       b'NZ6T-14D049-AA\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+      b'LB5T-14D049-AB\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',#STRATEGY_FUSION_HYBRID_AWD2017_RADAR
     ],
     (Ecu.fwdCamera, 0x706, None): [
       b'NZ6T-14F397-AC\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+      b'KT4T-14F397-AE\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00', #STRATEGY_FUSION_HYBRID_AWD2017_CAMERA
     ],
   },
   CAR.FORD_RANGER_MK2: {
