@@ -133,7 +133,7 @@ class CAR(Platforms):
       FordCarDocs("Ford Maverick 2022", "LARIAT Luxury", hybrid=True),
       FordCarDocs("Ford Maverick 2023-24", "Co-Pilot360 Assist", hybrid=True),
     ],
-    CarSpecs(mass=1650, wheelbase=3.076, steerRatio=17.0),
+    CarSpecs(mass=1691, wheelbase=2.85, steerRatio=16.7),
   )
   FORD_MUSTANG_MACH_E_MK1 = FordCANFDPlatformConfig(
     [FordCarDocs("Ford Mustang Mach-E 2021-23", "Co-Pilot360 Active 2.0")],
