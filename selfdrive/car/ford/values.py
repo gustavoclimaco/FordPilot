@@ -138,6 +138,14 @@ class CAR(Platforms):
     [FordCarDocs("Ford Mustang Mach-E 2021-23", "Co-Pilot360 Active 2.0")],
     CarSpecs(mass=2200, wheelbase=2.984, steerRatio=17.0),  # TODO: check steer ratio
   )
+  FUSION_RT = FordPlatformConfig(
+    "FORD FUSION - RETROFITED",
+    [
+      FordCarDocs("Ford Fusion AWD 2016 - 2019", "Co-Pilot360 Assist"),
+      FordCarDocs("Ford Fusion Hybrid 2016 - 2019", "Co-Pilot360 Assist", hybrid=True),
+    ],
+    CarSpecs(mass=1691, wheelbase=2.85, steerRatio=16.7),
+  )
   FORD_RANGER_MK2 = FordCANFDPlatformConfig(
     [FordCarDocs("Ford Ranger 2024", "Adaptive Cruise Control with Lane Centering")],
     CarSpecs(mass=2000, wheelbase=3.27, steerRatio=17.0),
