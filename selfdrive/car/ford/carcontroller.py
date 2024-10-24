@@ -78,6 +78,15 @@ class CarController(CarControllerBase):
       else:
         apply_curvature = 0.
 
+      #Teste de erro de curvatura_correção da bluepilot
+      steeringPressed = CS.out.steeringPressed
+      steeringAngleDeg = CS.out.steeringAngleDeg
+      if steeringPressed and abs(steeringAngleDeg) > 60:
+        apply_curvature = 0
+        ramp_type = 3
+      else:
+        ramp_type = 0
+
       self.apply_curvature_last = apply_curvature
 
       if self.CP.flags & FordFlags.CANFD:
