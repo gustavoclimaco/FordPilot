@@ -99,18 +99,19 @@ class CarState(CarStateBase):
       ret.accFaulted = ret.accFaulted or cp_cam.vl["ACCDATA"]["CmbbDeny_B_Actl"] == 1
 
     # gear
-    if self.CP.transmissionType == TransmissionType.automatic:
-      if self.CP.flags & FordFlags.ALT_STEER_ANGLE:
-        gear = self.shifter_values.get(cp.vl["TransGearData"]["GearLvrPos_D_Actl"])
-      else:
-        gear = self.shifter_values.get(cp.vl["Gear_Shift_by_Wire_FD1"]["TrnRng_D_RqGsm"])
-      ret.gearShifter = self.parse_gear_shifter(gear)
-    elif self.CP.transmissionType == TransmissionType.manual:
-      ret.clutchPressed = cp.vl["Engine_Clutch_Data"]["CluPdlPos_Pc_Meas"] > 0
-      if bool(cp.vl["BCM_Lamp_Stat_FD1"]["RvrseLghtOn_B_Stat"]):
-        ret.gearShifter = GearShifter.reverse
-      else:
-        ret.gearShifter = GearShifter.drive
+    ret.gearShifter = GearShifter.drive
+   # if self.CP.transmissionType == TransmissionType.automatic:
+    #  if self.CP.flags & FordFlags.ALT_STEER_ANGLE:
+     #   gear = self.shifter_values.get(cp.vl["TransGearData"]["GearLvrPos_D_Actl"])
+      #else:
+      #  gear = self.shifter_values.get(cp.vl["Gear_Shift_by_Wire_FD1"]["TrnRng_D_RqGsm"])
+      #ret.gearShifter = self.parse_gear_shifter(gear)
+    #elif self.CP.transmissionType == TransmissionType.manual:
+    #  ret.clutchPressed = cp.vl["Engine_Clutch_Data"]["CluPdlPos_Pc_Meas"] > 0
+    #  if bool(cp.vl["BCM_Lamp_Stat_FD1"]["RvrseLghtOn_B_Stat"]):
+    #    ret.gearShifter = GearShifter.reverse
+    #  else:
+    #    ret.gearShifter = GearShifter.drive
 
     # safety
     ret.stockFcw = bool(cp_cam.vl["ACCDATA_3"]["FcwVisblWarn_B_Rq"])
@@ -188,15 +189,15 @@ class CarState(CarStateBase):
         ("INSTRUMENT_PANEL", 1),
       ]
 
-    if CP.transmissionType == TransmissionType.automatic:
-      messages += [
-        ("Gear_Shift_by_Wire_FD1", 10),
-      ]
-    elif CP.transmissionType == TransmissionType.manual:
-      messages += [
-        ("Engine_Clutch_Data", 33),
-        ("BCM_Lamp_Stat_FD1", 1),
-      ]
+ #   if CP.transmissionType == TransmissionType.automatic:
+ #     messages += [
+ #       ("Gear_Shift_by_Wire_FD1", 10),
+ #     ]
+ #  elif CP.transmissionType == TransmissionType.manual:
+ #     messages += [
+ #       ("Engine_Clutch_Data", 33),
+ #      ("BCM_Lamp_Stat_FD1", 1),
+ #    ]
 
     if CP.enableBsm and not (CP.flags & FordFlags.CANFD):
       messages += [
