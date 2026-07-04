@@ -226,10 +226,10 @@ class Soundd:
         assert stream.active
 
         # Update FrogPilot variables
-        if sm['frogpilotPlan'].togglesUpdated:
+        if sm['frogpilotPlan'].togglesUpdated or sm['frogpilotPlan'].themeUpdated:
           self.frogpilot_toggles = get_frogpilot_toggles()
 
-          self.update_frogpilot_sounds()
+          self.update_frogpilot_sounds(force_reload=sm['frogpilotPlan'].themeUpdated)
 
           if self.restart_stream:
             stream.close()
@@ -238,7 +238,7 @@ class Soundd:
 
             self.restart_stream = False
 
-  def update_frogpilot_sounds(self):
+  def update_frogpilot_sounds(self, force_reload=False):
     self.volume_map = {
       AudibleAlert.engage: self.frogpilot_toggles.engage_volume / 100.0,
       AudibleAlert.disengage: self.frogpilot_toggles.disengage_volume / 100.0,
@@ -264,7 +264,7 @@ class Soundd:
     else:
       self.sound_directory = Path(BASEDIR) / "selfdrive" / "assets" / "sounds"
 
-    if self.frogpilot_toggles.sound_pack != self.previous_sound_pack:
+    if force_reload or self.frogpilot_toggles.sound_pack != self.previous_sound_pack:
       self.load_sounds()
       self.previous_sound_pack = self.frogpilot_toggles.sound_pack
       self.restart_stream = True

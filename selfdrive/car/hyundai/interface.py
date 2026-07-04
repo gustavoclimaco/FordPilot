@@ -106,7 +106,7 @@ class CarInterface(CarInterfaceBase):
 
     # *** feature detection ***
     if candidate in CANFD_CAR:
-      ret.enableBsm = 0x1e5 in fingerprint[CAN.ECAN]
+      ret.enableBsm = 0x1ba in fingerprint[CAN.ECAN]
     else:
       ret.enableBsm = 0x58b in fingerprint[0]
 

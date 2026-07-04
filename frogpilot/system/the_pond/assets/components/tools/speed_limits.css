@@ -2,6 +2,7 @@
   background-color: var(--input-bg);
   border: none;
   border-radius: var(--border-radius-lg);
+  box-sizing: border-box;
   color: var(--text-color);
   font-size: var(--font-size-base);
   font-weight: var(--font-weight-demi-bold);
@@ -16,26 +17,27 @@
   margin-top: var(--padding-sm);
 }
 
-.download-speed-limits-button:hover {
+.download-speed-limits-button:hover:enabled {
   box-shadow: var(--shadow-md);
-  color: var(--secondary-fg);
   transform: var(--hover-scale-sm);
 }
+
+.download-speed-limits-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
 .download-speed-limits-button-wrapper {
-  height: calc(100% + 20px);
-  position: relative;
+  align-items: center;
+  display: flex;
+  flex-direction: column;
   width: 100%;
 }
 
 .download-speed-limits-link {
   color: var(--text-color);
   font-size: var(--font-size-sm);
-  left: 50%;
-  margin-top: var(--border-radius-sm);
-  position: absolute;
+  margin-top: var(--padding-sm);
   text-decoration: underline;
-  top: 100%;
-  transform: translateX(-50%);
   white-space: nowrap;
 }
 
@@ -48,6 +50,7 @@
   background-color: var(--input-bg);
   border-radius: var(--border-radius-lg);
   box-shadow: var(--shadow-sm);
+  box-sizing: border-box;
   color: var(--text-color);
   font-size: var(--font-size-lg);
   font-weight: var(--font-weight-bold);
@@ -74,9 +77,4 @@
   padding: var(--padding-lg);
   transform-origin: top center;
   transition: box-shadow var(--transition-fast), transform var(--transition-fast);
-}
-
-.download-speed-limits-widget:hover {
-  box-shadow: var(--shadow-md);
-  transform: var(--hover-scale-sm);
 }

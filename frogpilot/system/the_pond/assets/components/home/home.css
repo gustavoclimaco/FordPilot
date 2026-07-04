@@ -15,7 +15,6 @@
 
 .diskUsage,
 .drivingStats,
-.firehoseStats,
 .softwareInfo {
   background-color: var(--secondary-bg);
   border-radius: var(--border-radius-md);
@@ -31,7 +30,6 @@
 }
 
 .diskUsage p,
-.firehoseStats p,
 .softwareGrid p {
   font-size: var(--font-size-sm);
   margin: 0;
@@ -41,6 +39,10 @@
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
   margin-bottom: var(--border-radius-xl);
+}
+
+.drivingStat div {
+  min-width: 0;
 }
 
 .drivingStat div p:first-of-type {
@@ -54,7 +56,12 @@
 }
 
 .drivingStat:last-of-type h2 {
-  color: var(--success-fg);
+  color: var(--success-text);
+}
+
+.error {
+  color: var(--danger-text);
+  font-weight: var(--font-weight-bold);
 }
 
 .softwareGrid {
@@ -63,16 +70,20 @@
   grid-template-columns: repeat(3, 1fr);
 }
 
-.diskUsage:hover,
-.drivingStats:hover,
-.firehoseStats:hover,
-.softwareInfo:hover {
-  box-shadow: var(--shadow-md);
-  transform: var(--hover-scale-sm);
-  transition: box-shadow var(--transition-fast), transform var(--transition-fast);
+.softwareGrid p {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
-@media only screen and (max-width: 768px) and (orientation: portrait) {
+@media only screen and (max-width: 768px) {
+  .drivingStat {
+    grid-template-columns: 1fr;
+  }
+
+  .drivingStat div p:first-of-type {
+    font-size: var(--font-size-base);
+  }
+
   .softwareGrid {
     display: grid;
     gap: 0.5em 1em;

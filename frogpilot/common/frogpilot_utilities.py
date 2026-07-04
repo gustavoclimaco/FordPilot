@@ -4,7 +4,6 @@ import json
 import math
 import numpy as np
 import requests
-import shutil
 import subprocess
 import tarfile
 import threading
@@ -20,14 +19,13 @@ import openpilot.system.sentry as sentry
 
 from cereal import log, messaging
 from opendbc.can.parser import CANParser
-from openpilot.common.params import Params, ParamKeyType
 from openpilot.common.realtime import DT_DMON, DT_HW
 from openpilot.selfdrive.car.toyota.carcontroller import LOCK_CMD
 from openpilot.system.hardware import HARDWARE
 from openpilot.system.version import get_build_metadata
 from panda import Panda
 
-from openpilot.frogpilot.common.frogpilot_variables import EARTH_RADIUS, ERROR_LOGS_PATH, EXCLUDED_KEYS, FROGPILOT_API, KONIK_PATH, MAPD_PATH, MAPS_PATH, GearShifter, frogpilot_default_params, params, params_cache, params_memory, update_frogpilot_toggles
+from openpilot.frogpilot.common.frogpilot_variables import EARTH_RADIUS, ERROR_LOGS_PATH, FROGPILOT_API, KONIK_PATH, MAPD_PATH, MAPS_PATH, params, params_cache, params_memory
 
 running_threads = {}
 
@@ -40,8 +38,7 @@ locks = {
   "lock_doors": threading.Lock(),
   "update_checks": threading.Lock(),
   "update_maps": threading.Lock(),
-  "update_openpilot": threading.Lock(),
-  "update_tinygrad": threading.Lock()
+  "update_openpilot": threading.Lock()
 }
 
 def run_thread_with_lock(name, target, args=(), report=True):
@@ -71,16 +68,22 @@ def calculate_bearing_offset(latitude, longitude, current_bearing, distance):
 
   new_latitude = math.asin(math.sin(lat_rad) * math.cos(delta) + math.cos(lat_rad) * math.sin(delta) * math.cos(bearing))
   new_longitude = lon_rad + math.atan2(math.sin(bearing) * math.sin(delta) * math.cos(lat_rad),  math.cos(delta) - math.sin(lat_rad) * math.sin(new_latitude))
-  return math.degrees(new_latitude), math.degrees(new_longitude)
+  return math.degrees(new_latitude), ((math.degrees(new_longitude) + 540) % 360) - 180
 
 def calculate_distance_to_point(lat1, lon1, lat2, lon2):
-  delta_lat = lat2 - lat1
-  delta_lon = lon2 - lon1
+  lat1_rad = math.radians(lat1)
+  lon1_rad = math.radians(lon1)
+  lat2_rad = math.radians(lat2)
+  lon2_rad = math.radians(lon2)
 
-  a = (math.sin(delta_lat / 2) ** 2) + math.cos(lat1) * math.cos(lat2) * (math.sin(delta_lon / 2) ** 2)
-  c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+  sin_delta_lat = math.sin((lat2_rad - lat1_rad) / 2)
+  sin_delta_lon = math.sin((lon2_rad - lon1_rad) / 2)
 
-  return EARTH_RADIUS * c
+  haversine = sin_delta_lat ** 2 + math.cos(lat1_rad) * math.cos(lat2_rad) * sin_delta_lon ** 2
+  haversine = min(1, max(0, haversine))
+
+  angular_distance = 2 * math.atan2(math.sqrt(haversine), math.sqrt(1 - haversine))
+  return EARTH_RADIUS * angular_distance
 
 def calculate_lane_width(lane, current_lane, road_edge=None):
   current_x = np.asarray(current_lane.x)
@@ -101,7 +104,7 @@ def calculate_lane_width(lane, current_lane, road_edge=None):
   return float(distance_to_lane)
 
 # Credit goes to Pfeiferj!
-def calculate_road_curvature(modelData, v_ego):
+def calculate_road_curvature(modelData):
   orientation_rate = np.array(modelData.orientationRate.z)
   velocity = np.array(modelData.velocity.x)
   timebase = np.array(modelData.orientationRate.t)
@@ -111,13 +114,13 @@ def calculate_road_curvature(modelData, v_ego):
   predicted_lateral_acc = float(lateral_acceleration[index])
   time_to_curve = float(timebase[index])
 
-  return predicted_lateral_acc / max(v_ego, 1)**2, max(time_to_curve, 1)
+  return float(predicted_lateral_acc / max(velocity[index], 1)**2), max(time_to_curve, 1)
 
 def capture_report(discord_user, report, frogpilot_toggles):
   if not is_url_pingable(FROGPILOT_API):
     return
 
-  api_token, build_metadata, device_type, dongle_id = get_frogpilot_api_info()
+  api_info = get_frogpilot_api_info()
 
   error_file_path = ERROR_LOGS_PATH / "error.txt"
   error_content = "No error log found."
@@ -125,12 +128,12 @@ def capture_report(discord_user, report, frogpilot_toggles):
     error_content = error_file_path.read_text()[:1000]
 
   payload = {
-    "api_token": api_token,
-    "build_metadata": build_metadata,
-    "device": device_type,
+    "api_token": api_info.api_token,
+    "build_metadata": api_info.build_metadata,
+    "device": api_info.device_type,
     "discord_user": discord_user,
     "error_content": error_content,
-    "frogpilot_dongle_id": dongle_id,
+    "frogpilot_dongle_id": api_info.dongle_id,
     "frogpilot_toggles": frogpilot_toggles,
     "report": report,
   }
@@ -141,71 +144,6 @@ def capture_report(discord_user, report, frogpilot_toggles):
     print("Successfully sent error report!")
   except requests.exceptions.RequestException as exception:
     print(f"Error sending report: {exception}")
-
-def check_remote_toggles(started=False, sm=None, boot_run=False):
-  if not boot_run:
-    if started and sm["carState"].gearShifter != GearShifter.park:
-      return
-    if sm["deviceState"].screenBrightnessPercent == 0:
-      return
-
-  if not params.get_bool("PondPaired"):
-    return
-
-  if not is_url_pingable(FROGPILOT_API):
-    return
-
-  try:
-    api_token = params.get("FrogPilotApiToken", encoding="utf-8")
-    dongle_id = params.get("FrogPilotDongleId", encoding="utf-8")
-
-    if not dongle_id or not api_token:
-      return
-
-    response = requests.get(
-      f"{FROGPILOT_API}/pond/toggles/pending",
-      params={"dongle_id": dongle_id, "api_token": api_token},
-      headers={"Content-Type": "application/json", "User-Agent": "frogpilot-api/1.0"},
-      timeout=10,
-    )
-    response.raise_for_status()
-
-    data = response.json()
-
-    if data.get("paired") is False:
-      params.put_bool("PondPaired", False)
-      print("Device was unpaired remotely")
-      return
-
-    toggles = data.get("toggles")
-    if not toggles:
-      return
-
-    for key, value in toggles.items():
-      if key in EXCLUDED_KEYS:
-        continue
-      if not params.check_key(key):
-        print(f"Skipping unknown param key: {key}")
-        continue
-      params.put(key, value)
-
-    update_frogpilot_toggles()
-
-    requests.post(
-      f"{FROGPILOT_API}/pond/toggles/ack",
-      json={
-        "api_token": api_token,
-        "device": HARDWARE.get_device_type(),
-        "frogpilot_dongle_id": dongle_id,
-      },
-      headers={"Content-Type": "application/json", "User-Agent": "frogpilot-api/1.0"},
-      timeout=10,
-    ).raise_for_status()
-
-    print(f"Successfully applied {len(toggles)} remote toggles")
-
-  except Exception as e:
-    print(f"Failed to check remote toggles: {e}")
 
 def clean_model_name(name):
   return (
@@ -241,7 +179,11 @@ def extract_zip(zip_file, extract_path):
   extract_path = Path(extract_path)
   print(f"Extracting {zip_file} to {extract_path}")
 
+  extract_root = extract_path.resolve()
   with zipfile.ZipFile(zip_file, "r") as zip_ref:
+    for member in zip_ref.namelist():
+      if not (extract_path / member).resolve().is_relative_to(extract_root):
+        raise ValueError(f"Refusing to extract path outside destination: {member}")
     zip_ref.extractall(extract_path)
 
   zip_file.unlink()
@@ -259,54 +201,43 @@ def flash_panda():
 
   params_memory.remove("FlashPanda")
 
+@dataclasses.dataclass(frozen=True)
+class FrogPilotApiInfo:
+  api_token: str | None
+  build_metadata: dict
+  device_type: str
+  dongle_id: str | None
+  os_version: str | None
+
 def get_frogpilot_api_info():
-  api_token = params.get("FrogPilotApiToken", encoding="utf-8")
-  build_metadata = dataclasses.asdict(get_build_metadata())
-  device_type = HARDWARE.get_device_type()
-  dongle_id = params.get("FrogPilotDongleId", encoding="utf-8")
-
-  return api_token, build_metadata, device_type, dongle_id
-
+  return FrogPilotApiInfo(
+    api_token=params.get("FrogPilotApiToken", encoding="utf-8"),
+    build_metadata=dataclasses.asdict(get_build_metadata()),
+    device_type=HARDWARE.get_device_type(),
+    dongle_id=params.get("FrogPilotDongleId", encoding="utf-8"),
+    os_version=HARDWARE.get_os_version(),
+  )
 
 def get_lock_status(can_parser, can_sock):
   can_msgs = messaging.drain_sock_raw(can_sock, wait_for_one=True)
   can_parser.update_strings(can_msgs)
   return can_parser.vl["DOOR_LOCKS"]["LOCK_STATUS"]
 
-def get_sentry_dsn():
-  try:
-    api_token, build_metadata, device_type, dongle_id = get_frogpilot_api_info()
-
-    payload = {
-      "api_token": api_token,
-      "build_metadata": build_metadata,
-      "device": device_type,
-      "frogpilot_dongle_id": dongle_id,
-    }
-
-    response = requests.post(f"{FROGPILOT_API}/sentry", json=payload, headers={"Content-Type": "application/json", "User-Agent": "frogpilot-api/1.0"}, timeout=10)
-    response.raise_for_status()
-    return response.json().get("dsn", "")
-  except Exception:
-    return ""
-
-
 def is_url_pingable(url):
   if not url:
     return False
 
-  if not hasattr(is_url_pingable, "session"):
-    is_url_pingable.session = requests.Session()
-    is_url_pingable.session.headers.update({"User-Agent": "frogpilot-ping-test/1.0 (https://github.com/FrogAi/FrogPilot)"})
-
+  headers = {"User-Agent": "frogpilot-ping-test/1.0 (https://github.com/FrogAi/FrogPilot)"}
   try:
-    response = is_url_pingable.session.head(url, timeout=10, allow_redirects=True)
-    if response.status_code in (405, 501):
-      response = is_url_pingable.session.get(url, timeout=10, allow_redirects=True, stream=True)
+    response = requests.head(url, headers=headers, timeout=10, allow_redirects=True)
+    try:
+      if response.status_code in (405, 501):
+        response.close()
+        response = requests.get(url, headers=headers, timeout=10, allow_redirects=True, stream=True)
 
-    is_accessible = response.ok
-    response.close()
-    return is_accessible
+      return response.ok
+    finally:
+      response.close()
 
   except (requests.exceptions.ConnectionError, requests.exceptions.SSLError):
     return False
@@ -318,10 +249,22 @@ def is_url_pingable(url):
     return False
 
 def load_json_file(path):
-  if path.is_file():
+  path = Path(path)
+  if not path.is_file():
+    return {}
+
+  try:
     with open(path) as file:
-      return json.load(file)
-  return {}
+      data = json.load(file)
+  except (OSError, json.JSONDecodeError):
+    print(f"Failed to load JSON file: {path}")
+    return {}
+
+  if not isinstance(data, dict):
+    print(f"Failed to load JSON file: {path}")
+    return {}
+
+  return data
 
 def lock_doors(lock_doors_timer, sm):
   wait_for_no_driver(sm, door_checks=True, time_threshold=lock_doors_timer)
@@ -349,6 +292,21 @@ def lock_doors(lock_doors_timer, sm):
     if lock_status == 0:
       break
 
+def parse_gps_position(gps_position):
+  if not isinstance(gps_position, dict):
+    return None
+
+  try:
+    latitude = float(gps_position["latitude"])
+    longitude = float(gps_position["longitude"])
+  except (KeyError, TypeError, ValueError):
+    return None
+
+  if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
+    return None
+
+  return latitude, longitude
+
 def run_cmd(cmd, success_message, fail_message, env=None, report=True):
   try:
     result = subprocess.run(cmd, capture_output=True, check=True, env=env, text=True)
@@ -375,9 +333,12 @@ def update_maps(now):
   while not MAPD_PATH.exists():
     time.sleep(60)
 
-  maps_selected = json.loads(params.get("MapsSelected", encoding="utf-8") or "{}")
+  try:
+    maps_selected = json.loads(params.get("MapsSelected", encoding="utf-8") or "{}")
+  except json.JSONDecodeError:
+    maps_selected = None
 
-  if isinstance(maps_selected, int):
+  if not isinstance(maps_selected, dict):
     params.remove("MapsSelected")
     params_cache.remove("MapsSelected")
     return
@@ -445,47 +406,6 @@ def update_openpilot():
       break
 
   HARDWARE.reboot()
-
-def upload_toggles():
-  if not is_url_pingable(FROGPILOT_API):
-    return
-
-  try:
-    api_token, build_metadata, device_type, dongle_id = get_frogpilot_api_info()
-    if not dongle_id or not api_token:
-      return
-
-    toggles = {}
-    for key, _, _, _ in frogpilot_default_params:
-      if key in EXCLUDED_KEYS or params.get_key_flag(key) & ParamKeyType.DONT_LOG:
-        continue
-      val = params.get(key)
-      if val is not None:
-        toggles[key] = val.decode("utf-8", "replace") if isinstance(val, (bytes, bytearray)) else val
-
-    if not toggles:
-      return
-
-    payload = {
-      "api_token": api_token,
-      "build_metadata": build_metadata,
-      "device": device_type,
-      "dongle_id": dongle_id,
-      "frogpilot_dongle_id": dongle_id,
-      "toggles": toggles,
-    }
-
-    requests.post(
-      f"{FROGPILOT_API}/pond/toggles/sync",
-      json=payload,
-      headers={"Content-Type": "application/json", "User-Agent": "frogpilot-api/1.0"},
-      timeout=10,
-    ).raise_for_status()
-
-    print("Successfully uploaded toggles to FrogPilot.com")
-
-  except Exception as e:
-    print(f"Failed to upload toggles: {e}")
 
 @cache
 def use_konik_server():

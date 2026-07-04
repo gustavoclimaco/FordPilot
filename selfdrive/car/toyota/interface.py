@@ -122,7 +122,9 @@ class CarInterface(CarInterfaceBase):
     #  - TSS2 radar ACC cars w/o smartDSU installed (disables radar)
     #  - TSS-P DSU-less cars w/ CAN filter installed (no radar parser yet)
 
-    ret.openpilotLongitudinalControl = use_sdsu or ret.enableDsu or candidate in (TSS2_CAR - RADAR_ACC_CAR) or bool(ret.flags & ToyotaFlags.DISABLE_RADAR.value)
+    dsu_bypass = frogpilot_toggles.toyota_dsu_bypass and not use_sdsu and not ret.enableDsu and candidate not in (TSS2_CAR | UNSUPPORTED_DSU_CAR)
+
+    ret.openpilotLongitudinalControl = use_sdsu or ret.enableDsu or candidate in (TSS2_CAR - RADAR_ACC_CAR) or bool(ret.flags & ToyotaFlags.DISABLE_RADAR.value) or dsu_bypass
     ret.openpilotLongitudinalControl &= not frogpilot_toggles.disable_openpilot_long
 
     ret.autoResumeSng = ret.openpilotLongitudinalControl and candidate in NO_STOP_TIMER_CAR
@@ -133,7 +135,7 @@ class CarInterface(CarInterfaceBase):
 
     # min speed to enable ACC. if car can do stop and go, then set enabling speed
     # to a negative value, so it won't matter.
-    ret.minEnableSpeed = -1. if (candidate in STOP_AND_GO_CAR or ret.enableGasInterceptor) else MIN_ACC_SPEED
+    ret.minEnableSpeed = -1. if (candidate in STOP_AND_GO_CAR or ret.enableGasInterceptor or use_sdsu) else MIN_ACC_SPEED
 
     ret.flags |= ToyotaFlags.RAISED_ACCEL_LIMIT.value
 
@@ -179,7 +181,7 @@ class CarInterface(CarInterfaceBase):
         events.add(EventName.resumeRequired)
       if self.CS.low_speed_lockout:
         events.add(EventName.lowSpeedLockout)
-      if ret.vEgo < self.CP.minEnableSpeed:
+      if ret.vEgo < self.CP.minEnableSpeed and not frogpilot_toggles.sng_hack:
         events.add(EventName.belowEngageSpeed)
         if c.actuators.accel > 0.3:
           # some margin on the actuator to not false trigger cancellation while stopping

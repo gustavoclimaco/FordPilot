@@ -247,9 +247,10 @@ class CarState(CarStateBase):
       messages += [
         ("ASCMLKASteeringCmd", 0),
       ]
-      if CP.flags & GMFlags.NO_ACCELERATOR_POS_MSG.value:
-        messages.remove(("ECMAcceleratorPos", 80))
-        messages.append(("EBCMBrakePedalPosition", 100))
+
+    if CP.flags & GMFlags.NO_ACCELERATOR_POS_MSG.value:
+      messages.remove(("ECMAcceleratorPos", 80))
+      messages.append(("EBCMBrakePedalPosition", 100))
 
     if CP.transmissionType == TransmissionType.direct:
       messages += [

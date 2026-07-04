@@ -1,16 +1,40 @@
-import { html } from "https://esm.sh/@arrow-js/core"
+import { html, reactive } from "/assets/vendor/arrow.mjs"
+import { Modal } from "/assets/components/modal.js";
+import { fetchJson } from "/assets/js/api.js"
 
 export function DoorControl () {
+  const state = reactive({
+    busy: false,
+    showUnlockModal: false,
+  });
+
   async function lockDoors () {
-    const response = await fetch("/api/doors/lock", { method: "POST" })
-    const result = await response.json()
-    showSnackbar(result.message || "Doors locked!")
+    state.busy = true;
+    try {
+      const result = await fetchJson("/api/doors/lock", { method: "POST" })
+      showSnackbar((result && result.message) || "Doors locked!")
+    } catch (e) {
+      showSnackbar(e.message || "Failed to lock doors...", "error")
+    } finally {
+      state.busy = false;
+    }
+  }
+
+  function confirmUnlock () {
+    state.showUnlockModal = true;
   }
 
   async function unlockDoors () {
-    const response = await fetch("/api/doors/unlock", { method: "POST" })
-    const result = await response.json()
-    showSnackbar(result.message || "Doors unlocked!")
+    state.showUnlockModal = false;
+    state.busy = true;
+    try {
+      const result = await fetchJson("/api/doors/unlock", { method: "POST" })
+      showSnackbar((result && result.message) || "Doors unlocked!")
+    } catch (e) {
+      showSnackbar(e.message || "Failed to unlock doors...", "error")
+    } finally {
+      state.busy = false;
+    }
   }
 
   return html`
@@ -20,9 +44,16 @@ export function DoorControl () {
         <p class="door-control-text">
           Remotely lock or unlock your car doors using the buttons below.
         </p>
-        <button class="door-control-button" @click="${lockDoors}">🔒 Lock Doors</button>
-        <button class="door-control-button" @click="${unlockDoors}">🔓 Unlock Doors</button>
+        <button class="door-control-button" disabled="${() => state.busy}" @click="${lockDoors}">🔒 Lock Doors</button>
+        <button class="door-control-button" disabled="${() => state.busy}" @click="${confirmUnlock}">🔓 Unlock Doors</button>
       </section>
+      ${() => state.showUnlockModal ? Modal({
+          title: "Confirm Unlock",
+          message: "Are you sure you want to unlock your car doors?",
+          onConfirm: unlockDoors,
+          onCancel: () => { state.showUnlockModal = false; },
+          confirmText: "Unlock"
+      }) : ""}
     </div>
   `
 }

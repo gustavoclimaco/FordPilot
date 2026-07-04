@@ -46,6 +46,7 @@ FrogPilotAnnotatedCameraWidget::FrogPilotAnnotatedCameraWidget(QWidget *parent) 
 }
 
 void FrogPilotAnnotatedCameraWidget::showEvent(QShowEvent *event) {
+  update_theme(frogpilotUIState());
   updateSignals();
 }
 

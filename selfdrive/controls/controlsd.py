@@ -190,7 +190,6 @@ class Controls:
 
     # FrogPilot variables
     self.belowSteerSpeed_shown = False
-    self.captured_memory_usage = False
     self.distance_pressed_previously = False
     self.resumeRequired_shown = False
     self.steerTempUnavailableSilent_shown = False
@@ -272,9 +271,6 @@ class Controls:
       self.events.add(EventName.outOfSpace)
     if self.sm['deviceState'].memoryUsagePercent > 90 and not SIMULATION:
       self.events.add(EventName.lowMemory)
-      if not self.captured_memory_usage:
-        sentry.capture_memory_usage()
-        self.captured_memory_usage = True
 
     # TODO: enable this once loggerd CPU usage is more reasonable
     #cpus = list(self.sm['deviceState'].cpuUsagePercent)

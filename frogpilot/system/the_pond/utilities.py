@@ -7,14 +7,12 @@ import re
 import secrets
 import shutil
 import subprocess
-import time
+import threading
 import uuid
 
 from datetime import datetime
 from pathlib import Path
 from PIL import Image
-from pydub import AudioSegment
-from typing import List
 from werkzeug.utils import secure_filename
 
 from openpilot.common.conversions import Conversions as CV
@@ -23,8 +21,8 @@ from openpilot.system.loggerd.deleter import PRESERVE_ATTR_NAME, PRESERVE_ATTR_V
 from openpilot.system.loggerd.uploader import listdir_by_creation
 from openpilot.tools.lib.route import SegmentName
 
-from openpilot.frogpilot.common.frogpilot_variables import THEME_SAVE_PATH, VIDEO_CACHE_PATH, params
 from openpilot.frogpilot.assets.theme_manager import HOLIDAY_THEME_PATH
+from openpilot.frogpilot.common.frogpilot_variables import THEME_SAVE_PATH, VIDEO_CACHE_PATH, params
 
 LOG_CANDIDATES = [
   "qlog",
@@ -41,6 +39,80 @@ TARGET_LOUDNESS = -15.0
 XOR_KEY = "s8#pL3*Xj!aZ@dWq"
 
 MAX_FILE_SIZE = 5 * 1024 * 1024
+
+IMAGE_EXTS = (".png", ".gif", ".jpg", ".jpeg")
+SOUND_NAMES = ("engage", "disengage", "prompt", "startup")
+DISTANCE_ICON_NAMES = ("traffic", "aggressive", "standard", "relaxed")
+
+def _file_too_large(file_storage):
+  stream = file_storage.stream
+  pos = stream.tell()
+  stream.seek(0, os.SEEK_END)
+  size = stream.tell()
+  stream.seek(pos)
+  return size > MAX_FILE_SIZE
+
+_FFMPEG_SEMAPHORE = threading.Semaphore(2)
+_FFMPEG_TIMEOUT = 600
+_FFPROBE_TIMEOUT = 30
+_NICE = (["nice", "-n", "19", "ionice", "-c", "3"]
+         if shutil.which("nice") and shutil.which("ionice") else [])
+_DURATION_CACHE: dict[str, float] = {}
+_VIDEO_CACHE_MIN_FREE = 500 * 1024 * 1024
+
+def _evict_video_cache():
+  try:
+    free = shutil.disk_usage(VIDEO_CACHE_PATH).free
+  except OSError:
+    return
+  if free >= _VIDEO_CACHE_MIN_FREE:
+    return
+  for cache_file in sorted(VIDEO_CACHE_PATH.glob("*.mp4"), key=lambda p: p.stat().st_atime):
+    if free >= _VIDEO_CACHE_MIN_FREE:
+      break
+    try:
+      size = cache_file.stat().st_size
+      cache_file.unlink()
+      free += size
+    except OSError:
+      pass
+
+def _oversize_error(file):
+  return f"File {file.filename} exceeds the 5MB limit." if _file_too_large(file) else None
+
+def _resize_image(path, ext, dims):
+  if ext == ".gif":
+    width, height = dims
+    palette_path = path.with_suffix(".palette.png")
+    resized_path = path.with_suffix(".resized.gif")
+    subprocess.run(["ffmpeg", "-i", str(path), "-vf", "palettegen", "-y", str(palette_path)], check=True, timeout=_FFMPEG_TIMEOUT)
+    subprocess.run(["ffmpeg", "-i", str(path), "-i", str(palette_path), "-lavfi",
+                    f"fps=20,scale={width}:{height}:flags=lanczos[x];[x][1:v]paletteuse", "-y", str(resized_path)],
+                   check=True, timeout=_FFMPEG_TIMEOUT)
+    palette_path.unlink()
+    resized_path.rename(path)
+    return path
+  img = Image.open(path).resize(dims, Image.Resampling.LANCZOS)
+  if ext != ".png":
+    path.unlink()
+    path = path.with_suffix(".png")
+  img.save(path, "PNG")
+  return path
+
+def _ffmpeg_to_mp4(input_args, cache_path):
+  base = _NICE + ["ffmpeg", "-hide_banner", "-loglevel", "error", *input_args]
+  tail = ["-movflags", "faststart", "-y", str(cache_path)]
+  with _FFMPEG_SEMAPHORE:
+    try:
+      subprocess.run([*base, "-c", "copy", *tail], check=True, timeout=_FFMPEG_TIMEOUT)
+    except subprocess.CalledProcessError:
+      subprocess.run([*base, "-c:v", "libx264", *tail], check=True, timeout=_FFMPEG_TIMEOUT)
+
+def first_image(directory, stem):
+  for ext in IMAGE_EXTS:
+    if (directory / f"{stem}{ext}").exists():
+      return f"{stem}{ext}"
+  return None
 
 def check_theme_components(theme_path):
   components = {
@@ -81,13 +153,14 @@ def check_theme_components(theme_path):
   else:
     wheel_path = THEME_SAVE_PATH / "steering_wheels"
     if wheel_path.exists():
-      theme_name = theme_path.name.replace('-user_created', '')
+      theme_name = theme_path.name.replace("-user_created", "")
       if any(wheel_path.glob(f"{theme_name}-user_created.*")):
         components["hasSteeringWheel"] = True
 
   return components
 
-def covert_audio(input_file):
+def convert_audio(input_file):
+  from pydub import AudioSegment
   sound = AudioSegment.from_file(input_file)
   sound = sound.set_frame_rate(48000)
   sound = sound.set_channels(1)
@@ -130,9 +203,6 @@ def create_theme(form_data, files, temporary=False):
     colors_str = form_data.get("colors")
     if colors_str:
       color_data = json.loads(colors_str)
-      for key, values in color_data.items():
-        if "alpha" in values:
-          values["alpha"] = values.pop("alpha")
       colors_file = theme_path / "colors" / "colors.json"
       with open(colors_file, "w") as f:
         json.dump(color_data, f, indent=2)
@@ -155,15 +225,15 @@ def create_theme(form_data, files, temporary=False):
 
       file = files.get("turnSignal")
       if file and file.filename:
-        if file.content_length > MAX_FILE_SIZE:
-          return None, f"File {file.filename} exceeds 1MB limit."
+        if err := _oversize_error(file):
+          return None, err
         ext = Path(file.filename).suffix
         file.save(signals_path / f"turn_signal{ext}")
 
       file = files.get("turnSignalBlindspot")
       if file and file.filename:
-        if file.content_length > MAX_FILE_SIZE:
-          return None, f"File {file.filename} exceeds 1MB limit."
+        if err := _oversize_error(file):
+          return None, err
         ext = Path(file.filename).suffix
         file.save(signals_path / f"turn_signal_blindspot{ext}")
 
@@ -178,8 +248,8 @@ def create_theme(form_data, files, temporary=False):
       for field, base_name in signal_map.items():
         file = files.get(field)
         if file and file.filename:
-          if file.content_length > MAX_FILE_SIZE:
-            return None, f"File {file.filename} exceeds 1MB limit."
+          if err := _oversize_error(file):
+            return None, err
           for f in signals_path.glob(f"{base_name}.*"):
             f.unlink()
           ext = Path(file.filename).suffix.lower()
@@ -198,8 +268,8 @@ def create_theme(form_data, files, temporary=False):
       for key in sequential_keys:
         file = files.get(key)
         if file and file.filename:
-          if file.content_length > MAX_FILE_SIZE:
-            return None, f"File {file.filename} exceeds 1MB limit."
+          if err := _oversize_error(file):
+            return None, err
           idx = key.split("_")[-1]
           ext = Path(file.filename).suffix
           file.save(signals_path / f"turn_signal_{idx}{ext}")
@@ -215,8 +285,8 @@ def create_theme(form_data, files, temporary=False):
     for field, (dest_path, base_name, resize_dims) in icon_map.items():
       file = files.get(field)
       if file and file.filename:
-        if file.content_length > MAX_FILE_SIZE:
-          return None, f"File {file.filename} exceeds 1MB limit."
+        if err := _oversize_error(file):
+          return None, err
 
         for f in dest_path.glob(f"{base_name}.*"):
           f.unlink()
@@ -226,20 +296,7 @@ def create_theme(form_data, files, temporary=False):
         file.save(save_path)
 
         if resize_dims:
-          if ext == ".gif":
-            width, height = resize_dims
-            palette_path = save_path.with_suffix(".palette.png")
-            temp_output_path = save_path.with_suffix(".resized.gif")
-            subprocess.run(["ffmpeg", "-i", str(save_path), "-vf", "palettegen", "-y", str(palette_path)], check=True)
-            subprocess.run(["ffmpeg", "-i", str(save_path), "-i", str(palette_path), "-lavfi", f"fps=20,scale={width}:{height}:flags=lanczos[x];[x][1:v]paletteuse", "-y", str(temp_output_path)], check=True)
-            palette_path.unlink()
-            temp_output_path.rename(save_path)
-          else:
-            img = Image.open(save_path).resize(resize_dims, Image.Resampling.LANCZOS)
-            if ext != ".png":
-              save_path.unlink()
-              save_path = save_path.with_suffix(".png")
-            img.save(save_path, "PNG")
+          _resize_image(save_path, ext, resize_dims)
 
   if save_checklist.get("steering_wheel"):
     wheels_dir = THEME_SAVE_PATH / "steering_wheels"
@@ -247,27 +304,14 @@ def create_theme(form_data, files, temporary=False):
     file = files.get("steeringWheel")
     saved_wheel_path = None
     if file and file.filename:
-      if file.content_length > MAX_FILE_SIZE:
-        return None, f"File {file.filename} exceeds 1MB limit."
+      if err := _oversize_error(file):
+        return None, err
       for f in wheels_dir.glob(f"{sane_theme_name}-user_created.*"):
         f.unlink()
       ext = Path(file.filename).suffix.lower()
       saved_wheel_path = wheels_dir / f"{sane_theme_name}-user_created{ext}"
       file.save(saved_wheel_path)
-      if ext == ".gif":
-        width, height = (250, 250)
-        palette_path = saved_wheel_path.with_suffix(".palette.png")
-        temp_output_path = saved_wheel_path.with_suffix(".resized.gif")
-        subprocess.run(["ffmpeg", "-i", str(saved_wheel_path), "-vf", "palettegen", "-y", str(palette_path)], check=True)
-        subprocess.run(["ffmpeg", "-i", str(saved_wheel_path), "-i", str(palette_path), "-lavfi", f"fps=20,scale={width}:{height}:flags=lanczos[x];[x][1:v]paletteuse", "-y", str(temp_output_path)], check=True)
-        palette_path.unlink()
-        temp_output_path.rename(saved_wheel_path)
-      else:
-        img = Image.open(saved_wheel_path).resize((250, 250), Image.Resampling.LANCZOS)
-        if ext != ".png":
-          saved_wheel_path.unlink()
-          saved_wheel_path = saved_wheel_path.with_suffix(".png")
-        img.save(saved_wheel_path, "PNG")
+      saved_wheel_path = _resize_image(saved_wheel_path, ext, (250, 250))
     if temporary and (theme_path is not None):
       existing = saved_wheel_path if saved_wheel_path is not None else next(wheels_dir.glob(f"{sane_theme_name}-user_created.*"), None)
       if existing:
@@ -281,11 +325,11 @@ def create_theme(form_data, files, temporary=False):
   if save_checklist.get("distance_icons"):
     dist_path = theme_path / "distance_icons"
     dist_path.mkdir(exist_ok=True)
-    for name in ["traffic", "aggressive", "standard", "relaxed"]:
+    for name in DISTANCE_ICON_NAMES:
       file = files.get(f"distanceIcons_{name}")
       if file and file.filename:
-        if file.content_length > MAX_FILE_SIZE:
-          return None, f"File {file.filename} exceeds 1MB limit."
+        if err := _oversize_error(file):
+          return None, err
 
         for f in dist_path.glob(f"{name}.*"):
           f.unlink()
@@ -293,33 +337,20 @@ def create_theme(form_data, files, temporary=False):
         ext = Path(file.filename).suffix.lower()
         save_path = dist_path / f"{name}{ext}"
         file.save(save_path)
-        if ext == ".gif":
-          width, height = (250, 250)
-          palette_path = save_path.with_suffix(".palette.png")
-          temp_output_path = save_path.with_suffix(".resized.gif")
-          subprocess.run(["ffmpeg", "-i", str(save_path), "-vf", "palettegen", "-y", str(palette_path)], check=True)
-          subprocess.run(["ffmpeg", "-i", str(save_path), "-i", str(palette_path), "-lavfi", f"fps=20,scale={width}:{height}:flags=lanczos[x];[x][1:v]paletteuse", "-y", str(temp_output_path)], check=True)
-          palette_path.unlink()
-          temp_output_path.rename(save_path)
-        else:
-          img = Image.open(save_path).resize((250, 250), Image.Resampling.LANCZOS)
-          if ext != ".png":
-            save_path.unlink()
-            save_path = save_path.with_suffix(".png")
-          img.save(save_path, "PNG")
+        _resize_image(save_path, ext, (250, 250))
 
   if save_checklist.get("sounds"):
     sounds_path = theme_path / "sounds"
     sounds_path.mkdir(exist_ok=True)
-    for name in ["engage", "disengage", "prompt", "startup"]:
+    for name in SOUND_NAMES:
       file = files.get(name)
       if file and file.filename:
-        if file.content_length > MAX_FILE_SIZE:
-          return None, f"File {file.filename} exceeds 1MB limit."
+        if err := _oversize_error(file):
+          return None, err
 
         save_path = sounds_path / f"{name}{Path(file.filename).suffix}"
         file.save(save_path)
-        covert_audio(str(save_path))
+        convert_audio(str(save_path))
 
   return theme_path, None
 
@@ -327,12 +358,6 @@ def decode_parameters(encoded_string):
   obfuscated_data = base64.b64decode(encoded_string.encode("utf-8")).decode("utf-8")
   decrypted_data = xor_encrypt_decrypt(obfuscated_data, XOR_KEY)
   return json.loads(decrypted_data)
-
-def encode_parameters(params_dict):
-  serialized_data = json.dumps(params_dict)
-  obfuscated_data = xor_encrypt_decrypt(serialized_data, XOR_KEY)
-  encoded_data = base64.b64encode(obfuscated_data.encode("utf-8")).decode("utf-8")
-  return encoded_data
 
 def ffmpeg_concat_segments_to_mp4(input_files, cache_key=None):
   if not input_files:
@@ -347,7 +372,9 @@ def ffmpeg_concat_segments_to_mp4(input_files, cache_key=None):
   cache_path = VIDEO_CACHE_PATH / f"{file_hash}.mp4"
 
   if cache_path.exists() and all(cache_path.stat().st_mtime > Path(f).stat().st_mtime for f in input_files):
-    return open(cache_path, "rb")
+    return cache_path
+
+  _evict_video_cache()
 
   list_file = VIDEO_CACHE_PATH / f"{file_hash}.txt"
   with open(list_file, "w") as f:
@@ -355,27 +382,16 @@ def ffmpeg_concat_segments_to_mp4(input_files, cache_key=None):
       f.write(f"file '{Path(seg)}'\n")
 
   try:
-    subprocess.run(
-      ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0",
-       "-i", str(list_file), "-c", "copy", "-movflags", "faststart", "-y", str(cache_path)],
-      check=True
-    )
-  except subprocess.CalledProcessError:
-    try:
-      subprocess.run(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0",
-         "-i", str(list_file), "-c:v", "libx264", "-movflags", "faststart", "-y", str(cache_path)],
-        check=True
-      )
-    except subprocess.CalledProcessError:
-      if cache_path.exists():
-        cache_path.unlink()
-      raise ValueError(f"Cannot process concatenated video segments: {input_files}")
+    _ffmpeg_to_mp4(["-f", "concat", "-safe", "0", "-i", str(list_file)], cache_path)
+  except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+    if cache_path.exists():
+      cache_path.unlink()
+    raise ValueError(f"Cannot process concatenated video segments: {input_files}")
   finally:
     if list_file.exists():
       list_file.unlink()
 
-  return open(cache_path, "rb")
+  return cache_path
 
 def ffmpeg_mp4_wrap_process_builder(filename):
   input_path = Path(filename)
@@ -392,39 +408,26 @@ def ffmpeg_mp4_wrap_process_builder(filename):
 
   VIDEO_CACHE_PATH.mkdir(exist_ok=True)
 
-  total, used, free = shutil.disk_usage(VIDEO_CACHE_PATH)
-  if free < 500 * 1024 * 1024:
-    for cache_file in VIDEO_CACHE_PATH.glob("*.mp4"):
-      try:
-        cache_file.unlink()
-      except:
-        pass
+  _evict_video_cache()
 
   file_hash = hashlib.md5(str(input_path).encode()).hexdigest()
   cache_path = VIDEO_CACHE_PATH / f"{file_hash}.mp4"
 
   if cache_path.exists() and cache_path.stat().st_mtime > input_path.stat().st_mtime:
-    return open(cache_path, "rb")
+    return cache_path
 
   try:
-    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(input_path), "-c", "copy", "-movflags", "faststart", "-y", str(cache_path)], check=True)
-  except subprocess.CalledProcessError:
-    try:
-      subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(input_path), "-c:v", "libx264", "-movflags", "faststart", "-y", str(cache_path)], check=True)
-    except subprocess.CalledProcessError:
-      if cache_path.exists():
-        cache_path.unlink()
-      raise ValueError(f"Cannot process video file: {input_path}")
+    _ffmpeg_to_mp4(["-i", str(input_path)], cache_path)
+  except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+    if cache_path.exists():
+      cache_path.unlink()
+    raise ValueError(f"Cannot process video file: {input_path}")
 
-  return open(cache_path, "rb")
+  return cache_path
 
 def format_git_date(raw_date: str):
-  date_object = datetime.strptime(raw_date.split()[1], "%Y-%m-%d")
-
-  day = date_object.day
-  suffix = "th" if 11 <= day <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
-
-  return date_object.strftime(f"%B {day}{suffix}, %Y")
+  from openpilot.frogpilot.system.the_pond.helpers import format_ordinal_date
+  return format_ordinal_date(datetime.strptime(raw_date.split()[1], "%Y-%m-%d"))
 
 def get_all_segment_names(footage_path):
   entries = listdir_by_creation(footage_path)
@@ -459,7 +462,7 @@ def get_disk_usage():
     "free": to_gb(free),
     "size": to_gb(total),
     "used": to_gb(used),
-    "usedPercentage": f"{(used / total) * 100:.2f}%"
+    "usedPercentage": f"{(used / total * 100) if total else 0:.2f}%"
   }]
 
 def get_drive_stats():
@@ -514,13 +517,22 @@ def get_segments_in_route(route_time_str, footage_path):
 
 def get_video_duration(input_path):
   try:
+    key = f"{input_path}:{os.path.getmtime(input_path)}"
+  except OSError:
+    key = None
+  if key and key in _DURATION_CACHE:
+    return _DURATION_CACHE[key]
+  try:
     result = subprocess.run([
       "ffprobe", "-v", "error", "-show_entries", "format=duration",
       "-of", "default=noprint_wrappers=1:nokey=1", str(input_path)
-    ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True)
-    return float(result.stdout)
-  except (ValueError, subprocess.CalledProcessError):
-    return 60
+    ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True, timeout=_FFPROBE_TIMEOUT)
+    duration = float(result.stdout)
+  except (ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+    duration = 60
+  if key:
+    _DURATION_CACHE[key] = duration
+  return duration
 
 def has_preserve_attr(path: str):
   return PRESERVE_ATTR_NAME in os.listxattr(path) and os.getxattr(path, PRESERVE_ATTR_NAME) == PRESERVE_ATTR_VALUE
@@ -533,21 +545,16 @@ def normalize_theme_name(name, for_path=False):
   if for_path:
     return name.lower().replace(" (", "-").replace(")", "").replace(" ", "-").replace("'", "").replace(".", "")
 
-  parts = re.split(r'[-_]', name)
+  parts = re.split(r"[-_]", name)
   normalized_parts = [part.capitalize() for part in parts]
 
-  if '-' in name and len(normalized_parts) > 1:
+  if "-" in name and len(normalized_parts) > 1:
     return f"{normalized_parts[0]} ({' '.join(normalized_parts[1:])})".replace(" Week", "")
-  return ' '.join(normalized_parts).replace(" Week", "")
+  return " ".join(normalized_parts).replace(" Week", "")
 
-def process_route(footage_path, route_name):
-  segment_path = f"{footage_path}{route_name}--0"
-  qcamera_path = f"{segment_path}/qcamera.ts"
-  rlog_path = f"{segment_path}/rlog"
-
-  png_output_path = os.path.join(segment_path, "preview.png")
-  if not os.path.exists(png_output_path):
-    video_to_png(qcamera_path, png_output_path)
+def route_metadata(footage_path, route_name):
+  segment_path = os.path.join(footage_path, f"{route_name}--0")
+  rlog_path = os.path.join(segment_path, "rlog")
 
   custom_name = None
   if os.path.isdir(segment_path):
@@ -569,20 +576,9 @@ def process_route(footage_path, route_name):
     "is_preserved": has_preserve_attr(segment_path)
   }
 
-def process_route_gif(footage_path, route_name):
-  segment_path = f"{footage_path}{route_name}--0"
-  qcamera_path = f"{segment_path}/qcamera.ts"
-  gif_output_path = os.path.join(segment_path, "preview.gif")
-
-  if not os.path.exists(gif_output_path):
-    video_to_gif(qcamera_path, gif_output_path)
-
-def process_screen_recording(mp4):
+def screen_recording_metadata(mp4):
   stem = mp4.with_suffix("")
   png_path = stem.with_suffix(".png")
-
-  if not png_path.exists():
-    video_to_png(mp4, png_path)
 
   is_custom_name = False
   try:
@@ -598,15 +594,15 @@ def process_screen_recording(mp4):
     "is_custom_name": is_custom_name
   }
 
-def process_screen_recording_gif(mp4):
-  stem = mp4.with_suffix("")
-  gif_path = stem.with_suffix(".gif")
-  if not gif_path.exists():
-    video_to_gif(mp4, gif_path)
-
 def run_ffmpeg(args):
-  process = subprocess.Popen(["ffmpeg", "-hide_banner", "-loglevel", "error"] + args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-  stdout, stderr = process.communicate()
+  with _FFMPEG_SEMAPHORE:
+    process = subprocess.Popen(_NICE + ["ffmpeg", "-hide_banner", "-loglevel", "error"] + args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+      stdout, _ = process.communicate(timeout=_FFMPEG_TIMEOUT)
+    except subprocess.TimeoutExpired:
+      process.kill()
+      process.communicate()
+      raise
   return stdout
 
 def segment_to_segment_name(data_dir, segment):

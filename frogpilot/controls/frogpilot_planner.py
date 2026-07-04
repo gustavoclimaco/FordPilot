@@ -12,7 +12,7 @@ from openpilot.selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import A_CHANGE_COST, DANGER_ZONE_COST, J_EGO_COST, STOP_DISTANCE
 
 from openpilot.frogpilot.common.frogpilot_utilities import calculate_lane_width, calculate_road_curvature
-from openpilot.frogpilot.common.frogpilot_variables import CRUISING_SPEED, MINIMUM_LATERAL_ACCELERATION, PLANNER_TIME, THRESHOLD, params, params_memory
+from openpilot.frogpilot.common.frogpilot_variables import CRUISING_SPEED, MINIMUM_LATERAL_ACCELERATION, PLANNER_TIME, THRESHOLD, params_memory
 from openpilot.frogpilot.controls.lib.conditional_experimental_mode import ConditionalExperimentalMode
 from openpilot.frogpilot.controls.lib.frogpilot_acceleration import FrogPilotAcceleration
 from openpilot.frogpilot.controls.lib.frogpilot_events import FrogPilotEvents
@@ -103,7 +103,7 @@ class FrogPilotPlanner:
     self.model_stopped = self.model_length < CRUISING_SPEED * PLANNER_TIME
     self.model_stopped |= self.frogpilot_vcruise.forcing_stop
 
-    self.road_curvature, self.time_to_curve = calculate_road_curvature(sm["modelV2"], v_ego)
+    self.road_curvature, self.time_to_curve = calculate_road_curvature(sm["modelV2"])
 
     self.road_curvature_detected = (1 / abs(self.road_curvature))**0.5 < v_ego > CRUISING_SPEED and not (sm["carState"].leftBlinker or sm["carState"].rightBlinker)
 
@@ -118,11 +118,15 @@ class FrogPilotPlanner:
       self.frogpilot_weather.weather_id = 0
 
   def update_lead_status(self):
+    closing_lead = self.lead_one.status
+    closing_lead &= self.lead_one.vRel < 0
+    closing_lead &= self.lead_one.dRel + (self.lead_one.vRel * PLANNER_TIME) < self.model_length + STOP_DISTANCE
+
     following_lead = self.lead_one.status
     following_lead &= self.lead_one.dRel < self.model_length + STOP_DISTANCE
 
     self.tracking_lead_filter.update(following_lead)
-    return self.tracking_lead_filter.x >= THRESHOLD
+    return closing_lead or self.tracking_lead_filter.x >= THRESHOLD
 
   def publish(self, theme_updated, toggles_updated, sm, pm, frogpilot_toggles):
     frogpilot_plan_send = messaging.new_message("frogpilotPlan")
@@ -130,11 +134,10 @@ class FrogPilotPlanner:
     frogpilotPlan = frogpilot_plan_send.frogpilotPlan
 
     frogpilotPlan.accelerationJerk = A_CHANGE_COST * self.frogpilot_following.acceleration_jerk
-    frogpilotPlan.accelerationJerkStock = A_CHANGE_COST * self.frogpilot_following.base_acceleration_jerk
-    frogpilotPlan.dangerFactor = self.frogpilot_following.danger_factor
+    frogpilotPlan.accelerationJerkStock = A_CHANGE_COST * self.frogpilot_following.acceleration_jerk
     frogpilotPlan.dangerJerk = DANGER_ZONE_COST * self.frogpilot_following.danger_jerk
     frogpilotPlan.speedJerk = J_EGO_COST * self.frogpilot_following.speed_jerk
-    frogpilotPlan.speedJerkStock = J_EGO_COST * self.frogpilot_following.base_speed_jerk
+    frogpilotPlan.speedJerkStock = J_EGO_COST * self.frogpilot_following.speed_jerk
     frogpilotPlan.tFollow = self.frogpilot_following.t_follow
 
     frogpilotPlan.cscControllingSpeed = self.frogpilot_vcruise.csc_controlling_speed
@@ -151,7 +154,7 @@ class FrogPilotPlanner:
     frogpilotPlan.frogpilotEvents = self.frogpilot_events.events.to_msg()
 
     frogpilotPlan.increasedStoppedDistance = frogpilot_toggles.increase_stopped_distance if not sm["frogpilotCarState"].trafficModeEnabled else 0
-    if self.frogpilot_weather.weather_id != 0:
+    if self.frogpilot_weather.weather_id != 0 and not sm["frogpilotCarState"].trafficModeEnabled:
       frogpilotPlan.increasedStoppedDistance += self.frogpilot_weather.increase_stopped_distance
 
     frogpilotPlan.laneWidthLeft = self.lane_width_left

@@ -17,7 +17,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.frogpilot.common.frogpilot_variables import MINIMUM_LATERAL_ACCELERATION
 
 LON_MPC_STEP = 0.2  # first step is 0.2s
-A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
+A_CRUISE_MAX_VALS = [2.0, 1.6, 0.8, 0.6]
 A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
@@ -155,7 +155,7 @@ class LongitudinalPlanner:
 
     self.mpc.set_weights(sm['frogpilotPlan'].accelerationJerk, sm['frogpilotPlan'].dangerJerk, sm['frogpilotPlan'].speedJerk, prev_accel_constraint, personality=sm['controlsState'].personality)
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
-    self.mpc.update(sm['radarState'], v_cruise, x, v, a, j, sm['frogpilotPlan'].dangerFactor, sm['frogpilotPlan'].tFollow, personality=sm['controlsState'].personality)
+    self.mpc.update(v_cruise, sm['modelV2'], sm['radarState'], x, v, a, j, sm['frogpilotPlan'].tFollow, accel_clip[0], accel_clip[1], frogpilot_toggles, sm['frogpilotCarState'].trafficModeEnabled, personality=sm['controlsState'].personality)
 
     self.a_desired_trajectory_full = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.a_solution)
     self.v_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.v_solution)
@@ -204,7 +204,7 @@ class LongitudinalPlanner:
     longitudinalPlan.accels = self.a_desired_trajectory.tolist()
     longitudinalPlan.jerks = self.j_desired_trajectory.tolist()
 
-    longitudinalPlan.hasLead = sm['radarState'].leadOne.status
+    longitudinalPlan.hasLead = self.mpc.status
     longitudinalPlan.longitudinalPlanSource = self.mpc.source
     longitudinalPlan.fcw = self.fcw
 

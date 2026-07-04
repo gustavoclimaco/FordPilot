@@ -37,12 +37,8 @@
   transition: box-shadow var(--transition-fast), transform var(--transition-fast);
 }
 
-.navkeys-container:hover {
-  transform: var(--hover-scale-sm);
-}
-
 .navkeys-error {
-  color: var(--danger-bg);
+  color: var(--danger-text);
   font-size: var(--font-size-sm);
   transition: opacity 0.5s ease;
 }
@@ -52,9 +48,14 @@
 }
 
 .navkeys-help-icon {
+  appearance: none;
+  background: none;
+  border: none;
+  color: inherit;
   cursor: pointer;
   font-size: var(--font-size-sm);
   margin-left: var(--gap-xxs);
+  padding: 0;
   position: relative;
   top: -1px;
 }
@@ -84,7 +85,7 @@
 }
 
 .navkeys-input::placeholder {
-  color: var(--text-muted);
+  color: #c0c0c0;
 }
 
 .navkeys-label {
@@ -95,7 +96,7 @@
 }
 
 .navkeys-message {
-  color: var(--success-bg);
+  color: var(--success-text);
   font-size: var(--font-size-sm);
   transition: opacity 0.5s ease;
 }
@@ -109,10 +110,6 @@
   gap: var(--gap-sm);
   margin-bottom: var(--margin-base);
   transition: transform var(--transition-fast);
-}
-
-.navkeys-row:hover {
-  transform: var(--hover-scale-sm);
 }
 
 .navkeys-status {

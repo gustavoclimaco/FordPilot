@@ -1,8 +1,8 @@
 #pragma once
 
-#include "omx_encoder.h"
-#include "blocking_queue.h"
+#include <memory>
 
+#include "frogpilot/ui/screenrecorder/recorder_engine.h"
 #include "selfdrive/ui/qt/onroad/buttons.h"
 
 class ScreenRecorder : public QPushButton {
@@ -10,6 +10,7 @@ class ScreenRecorder : public QPushButton {
 
 public:
   explicit ScreenRecorder(QWidget *parent = nullptr);
+  ~ScreenRecorder();
 
   void startRecording();
   void stopRecording();
@@ -21,28 +22,19 @@ private slots:
   void toggleRecording();
 
 private:
-  void encodeImage();
   void updateState();
-
-  bool recording;
-
-  int frameCount;
-
-  qint64 startedTime;
-
-  std::thread encodingThread;
-
-  std::unique_ptr<OmxEncoder> encoder;
-
-  std::vector<uint8_t> rgbScaleBuffer;
-
-  BlockingQueue<QImage> imageQueue{UI_FREQ};
 
   QColor blackColor(int alpha = 255) { return QColor(0, 0, 0, alpha); }
   QColor redColor(int alpha = 255) { return QColor(201, 34, 49, alpha); }
   QColor whiteColor(int alpha = 255) { return QColor(255, 255, 255, alpha); }
 
-  QImage synthesizeFrame(const QImage &frame1, const QImage &frame2, double alpha);
+  bool recording = false;
+
+  int frameCount = 0;
+
+  qint64 startedTime = 0;
+
+  std::unique_ptr<RecorderEngine> engine;
 
   QWidget *rootWidget;
 };

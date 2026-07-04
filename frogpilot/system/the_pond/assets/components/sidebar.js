@@ -1,6 +1,6 @@
-import { html, reactive } from "https://esm.sh/@arrow-js/core";
+import { html, reactive } from "/assets/vendor/arrow.mjs";
 import { Link } from "/assets/components/router.js";
-import { upperFirst, hideSidebar } from "/assets/js/utils.js";
+import { upperFirst, hideSidebar, showSidebar } from "/assets/js/utils.js";
 
 const MenuItems = {
   home: [
@@ -73,25 +73,25 @@ export function Sidebar() {
     window.scrollTo(0, 0);
     hideSidebar();
 
-    document.querySelectorAll('.sidebar li').forEach(el => {
-      el.classList.remove('active');
+    document.querySelectorAll(".sidebar li").forEach(el => {
+      el.classList.remove("active");
     });
 
     const linkElement = document.querySelector(`.sidebar li a[href="${link.link}"]`);
     if (linkElement) {
-      linkElement.parentElement.classList.add('active');
+      linkElement.parentElement.classList.add("active");
     }
   }
 
   return html`
-    <div id="sidebarUnderlay" class="hidden"></div>
-    <div id="sidebar" class="sidebar">
+    <div id="sidebarUnderlay" class="hidden" @click="${hideSidebar}"></div>
+    <div id="sidebar" class="sidebar" role="navigation" aria-label="Main">
       <div>
         <div class="title">
           <img class="logo" src="/assets/images/main_logo.png" alt="FrogPilot logo" />
           <div class="title_text sidebar_header">
             <p>The Pond</p>
-            <a href="https://github.com/Aidenir">by&nbsp;Aidenir</a>
+            <a href="https://github.com/Aidenir" target="_blank" rel="noopener noreferrer">by&nbsp;Aidenir</a>
           </div>
         </div>
         <hr />
@@ -122,7 +122,7 @@ export function Sidebar() {
 
                     return html`
                       <li class="${classList}">
-                        ${Link(link.link, content, () => navigate(link))}
+                        ${Link(link.link, content, () => navigate(link), "", isActive ? "page" : null)}
                       </li>
                     `;
                   })}
@@ -137,15 +137,16 @@ export function Sidebar() {
 
 function setupMenuButton() {
   const button = document.getElementById("menu_button");
-  const sidebar = document.getElementById("sidebar");
-  const underlay = document.getElementById("sidebarUnderlay");
+  if (!button) return;
 
   button.addEventListener("click", () => {
-    sidebar.classList.toggle("visible");
-    underlay.classList.toggle("hidden");
+    const sidebar = document.getElementById("sidebar");
+    if (sidebar?.classList.contains("visible")) {
+      hideSidebar();
+    } else {
+      showSidebar();
+    }
   });
-
-  underlay.addEventListener("click", hideSidebar);
 }
 
 document.addEventListener("DOMContentLoaded", setupMenuButton, false);

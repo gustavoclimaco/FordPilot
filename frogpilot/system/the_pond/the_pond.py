@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
-from flask import Flask, Response, jsonify, render_template, request, send_file, send_from_directory
-from io import BytesIO
-from pathlib import Path
-from werkzeug.utils import secure_filename
-
 import base64
-import errno
 import hashlib
 import json
 import os
@@ -15,14 +7,21 @@ import re
 import requests
 import secrets
 import shutil
-import signal
+import socket
+import struct
 import subprocess
+import threading
 import time
-import traceback
+
+from datetime import datetime, timedelta, timezone
+from flask import Flask, Response, jsonify, render_template, request, send_file, send_from_directory, stream_with_context
+from io import BytesIO
+from pathlib import Path
+from werkzeug.utils import secure_filename
 
 from cereal import car, messaging
 from opendbc.can.parser import CANParser
-from openpilot.common.realtime import DT_HW
+from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.car.toyota.carcontroller import LOCK_CMD, UNLOCK_CMD
 from openpilot.system.hardware import HARDWARE, PC
 from openpilot.system.hardware.hw import Paths
@@ -34,7 +33,7 @@ from openpilot.frogpilot.assets.theme_manager import HOLIDAY_THEME_PATH, THEME_C
 from openpilot.frogpilot.common.frogpilot_utilities import delete_file, get_frogpilot_api_info, get_lock_status, is_url_pingable, run_cmd, extract_tar
 from openpilot.frogpilot.common.frogpilot_variables import ACTIVE_THEME_PATH, ERROR_LOGS_PATH, EXCLUDED_KEYS, FROGPILOT_API, RESOURCES_REPO, SCREEN_RECORDINGS_PATH, THEME_SAVE_PATH,\
                                                            frogpilot_default_params, params, params_memory, update_frogpilot_toggles
-from openpilot.frogpilot.system.the_pond import utilities
+from openpilot.frogpilot.system.the_pond import helpers, utilities
 
 FOOTAGE_PATHS = [
   Paths.log_root(HD=True, raw=True),
@@ -50,70 +49,201 @@ KEYS = {
 }
 
 TMUX_LOGS_PATH = Path("/data/tmux_logs")
+TAILSCALE_BASE = "/data/tailscale"
+NAVIGATION_TRAINING_PATH = "/data/openpilot/frogpilot/navigation/navigation_training"
+
+_PARAMS_LOCK = threading.RLock()
+
+_CMD_TIMEOUT = 60
+_TMUX_STREAM_MAX_SECONDS = 3600
+
+def _run_cmd(cmd, ok, fail, **kw):
+  kw.setdefault("timeout", _CMD_TIMEOUT)
+  return run_cmd(cmd, ok, fail, **kw)
+
+_CSP = (
+  "default-src 'self'; "
+  "script-src 'self'; "
+  "style-src 'self' 'unsafe-inline'; "
+  "img-src 'self' data: blob: https://api.mapbox.com https://*.tiles.mapbox.com; "
+  "font-src 'self' data:; "
+  "connect-src 'self' https://api.mapbox.com https://events.mapbox.com https://*.tiles.mapbox.com; "
+  "worker-src blob:; "
+  "child-src blob:; "
+  "object-src 'none'; "
+  "base-uri 'self'; "
+  "form-action 'self'; "
+  "frame-ancestors 'none'"
+)
+
+def _allowed_hosts():
+  hosts = {"localhost", "127.0.0.1"}
+  self_host = (request.host or "").split(":")[0].lower()
+  if self_host:
+    hosts.add(self_host)
+  return hosts
+
+def _car_params():
+  cp_bytes = params.get("CarParamsPersistent")
+  if not cp_bytes:
+    return None
+  try:
+    with car.CarParams.from_bytes(cp_bytes) as cp_reader:
+      return cp_reader.as_builder()
+  except Exception:
+    cloudlog.exception("the_pond: failed to parse CarParamsPersistent")
+    return None
+
+def _favorite_id(fav):
+  raw = f"{fav.get('longitude')},{fav.get('latitude')}|{fav.get('routeId') or ''}|{fav.get('name') or ''}"
+  return hashlib.sha1(raw.encode()).hexdigest()
+
+def _frogpilot_api_payload(**extra):
+  info = get_frogpilot_api_info()
+  return {
+    "api_token": info.api_token,
+    "build_metadata": info.build_metadata,
+    "device": info.device_type,
+    "frogpilot_dongle_id": info.dongle_id,
+    **extra,
+  }
+
+def _gitlab_action(file_path, content):
+  return {"action": "create", "file_path": file_path, "content": content, "encoding": "base64"}
+
+_gear_lock = threading.Lock()
+_parked_snapshot = {"parked": False, "fresh": False}
+
+def _gear_monitor():
+  sm = None
+  while True:
+    try:
+      if sm is None:
+        sm = messaging.SubMaster(["frogpilotCarState"])
+      sm.update(1000)
+      fresh = sm.alive["frogpilotCarState"] and sm.valid["frogpilotCarState"]
+      parked = bool(sm["frogpilotCarState"].isParked) if fresh else False
+      with _gear_lock:
+        _parked_snapshot["parked"] = parked
+        _parked_snapshot["fresh"] = fresh
+    except Exception:
+      sm = None
+      with _gear_lock:
+        _parked_snapshot["fresh"] = False
+      time.sleep(0.5)
+
+def _is_parked():
+  with _gear_lock:
+    return _parked_snapshot["fresh"] and _parked_snapshot["parked"]
+
+def _drive_locked():
+  return params.get_bool("IsOnroad") and not _is_parked()
 
 def setup(app):
+  @app.before_request
+  def _request_gate():
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+      origin = request.headers.get("Origin") or request.headers.get("Referer")
+      if not helpers.origin_allowed(origin, _allowed_hosts()):
+        return jsonify({"error": "Cross-origin request blocked"}), 403
+
+    if helpers.is_onroad_blocked(request.method, request.path) and _drive_locked():
+      return jsonify({"error": "Unavailable while driving. Shift into Park or go offroad to use this."}), 423
+
+  @app.after_request
+  def _security_headers(resp):
+    resp.headers.setdefault("Content-Security-Policy", _CSP)
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "same-origin"
+    return resp
+
   @app.errorhandler(404)
   def not_found(_):
+    if request.path.startswith("/api/"):
+      return jsonify({"error": "Not found"}), 404
     return render_template("index.html")
+
+  @app.errorhandler(405)
+  def method_not_allowed(_):
+    if request.path.startswith("/api/"):
+      return jsonify({"error": "Method not allowed"}), 405
+    return render_template("index.html")
+
+  @app.errorhandler(500)
+  def internal_error(_):
+    if request.path.startswith("/api/"):
+      return jsonify({"error": "Internal server error"}), 500
+    return render_template("index.html"), 500
 
   @app.route("/", methods=["GET"])
   def index():
     return render_template("index.html")
 
+  @app.route("/api/onroad", methods=["GET"])
+  def onroad_status():
+    return jsonify({"onroad": _drive_locked()})
+
   @app.route("/api/doors_available", methods=["GET"])
   def doors_available():
-    with car.CarParams.from_bytes(params.get("CarParamsPersistent")) as cp_reader:
-      CP = cp_reader.as_builder()
-
-    return jsonify({"result": HARDWARE.get_device_type() != "tici" and CP.carName == "toyota"})
+    cp = _car_params()
+    if cp is None:
+      return jsonify({"result": False})
+    return jsonify({"result": HARDWARE.get_device_type() != "tici" and cp.carName == "toyota"})
 
   @app.route("/api/doors/lock", methods=["POST"])
   def lock_doors():
+    cp = _car_params()
+    if cp is None or cp.carName != "toyota":
+      return jsonify({"error": "Door control is only supported on Toyota vehicles"}), 409
+
+    cloudlog.warning("the_pond audit: door lock requested")
     can_parser = CANParser("toyota_nodsu_pt_generated", [("DOOR_LOCKS", 3)], bus=0)
     can_sock = messaging.sub_sock("can", timeout=100)
-
-    while True:
+    try:
       with Panda(disable_checks=True) as panda:
         if not params.get_bool("IsOnroad"):
           panda.set_safety_mode(panda.SAFETY_TOYOTA)
-        panda.can_send(0x750, LOCK_CMD, 0)
-
-      time.sleep(1)
-
-      lock_status = get_lock_status(can_parser, can_sock)
-      if lock_status == 0:
-        break
-
-    return {"message": "Doors locked!"}
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+          panda.can_send(0x750, LOCK_CMD, 0)
+          time.sleep(1)
+          if get_lock_status(can_parser, can_sock) == 0:
+            return {"message": "Doors locked!"}
+      return jsonify({"error": "Timed out waiting for doors to lock"}), 504
+    finally:
+      del can_sock
 
   @app.route("/api/doors/unlock", methods=["POST"])
   def unlock_doors():
+    cp = _car_params()
+    if cp is None or cp.carName != "toyota":
+      return jsonify({"error": "Door control is only supported on Toyota vehicles"}), 409
+
+    cloudlog.warning("the_pond audit: door unlock requested")
     can_parser = CANParser("toyota_nodsu_pt_generated", [("DOOR_LOCKS", 3)], bus=0)
     can_sock = messaging.sub_sock("can", timeout=100)
-
-    while True:
+    try:
       with Panda(disable_checks=True) as panda:
         if not params.get_bool("IsOnroad"):
           panda.set_safety_mode(panda.SAFETY_TOYOTA)
-        panda.can_send(0x750, UNLOCK_CMD, 0)
-
-      time.sleep(1)
-
-      lock_status = get_lock_status(can_parser, can_sock)
-      if lock_status != 0:
-        break
-
-    return {"message": "Doors unlocked!"}
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+          panda.can_send(0x750, UNLOCK_CMD, 0)
+          time.sleep(1)
+          if get_lock_status(can_parser, can_sock) != 0:
+            return {"message": "Doors unlocked!"}
+      return jsonify({"error": "Timed out waiting for doors to unlock"}), 504
+    finally:
+      del can_sock
 
   @app.route("/api/error_logs", methods=["GET"])
   def get_error_logs():
-    if request.accept_mimetypes["text/html"]:
-      return render_template("v2/error-logs.jinja", active="error_logs")
-
-    if request.accept_mimetypes["application/json"]:
-      files = utilities.list_file(ERROR_LOGS_PATH)
-      filtered = [file for file in files if not file.startswith("error")]
-      return filtered, 200
+    if not os.path.exists(ERROR_LOGS_PATH):
+      return jsonify([]), 200
+    files = utilities.list_file(ERROR_LOGS_PATH)
+    filtered = [file for file in files if file.startswith("error")]
+    return jsonify(filtered), 200
 
   @app.route("/api/error_logs/delete_all", methods=["DELETE"])
   def delete_all_error_logs():
@@ -123,12 +253,20 @@ def setup(app):
 
   @app.route("/api/error_logs/<filename>", methods=["DELETE"])
   def delete_error_log(filename):
-    delete_file(os.path.join(ERROR_LOGS_PATH, filename))
+    safe = secure_filename(filename)
+    path = os.path.join(ERROR_LOGS_PATH, safe)
+    if not safe or not os.path.isfile(path):
+      return jsonify({"error": "Not found"}), 404
+    delete_file(path)
     return {"message": "Error log deleted!"}
 
   @app.route("/api/error_logs/<filename>", methods=["GET"])
   def get_error_log(filename):
-    with open(os.path.join(ERROR_LOGS_PATH, filename)) as file:
+    safe = secure_filename(filename)
+    path = os.path.join(ERROR_LOGS_PATH, safe)
+    if not safe or not os.path.isfile(path):
+      return jsonify({"error": "Not found"}), 404
+    with open(path) as file:
       return file.read(), 200, {"Content-Type": "text/plain; charset=utf-8"}
 
   @app.route("/api/navigation", methods=["DELETE"])
@@ -138,82 +276,85 @@ def setup(app):
 
   @app.route("/api/navigation", methods=["GET"])
   def navigation():
-    last_position = json.loads(
-      params.get("LastGPSPosition", encoding="utf8") or
-      "{\"latitude\": 51.276824158421331, \"longitude\": 30.221928335547232, \"altitude\": 111.0}"
-    )
+    try:
+      last_position = json.loads(params.get("LastGPSPosition", encoding="utf8") or "{}")
+    except (ValueError, TypeError):
+      last_position = {}
+    if not isinstance(last_position, dict):
+      last_position = {}
+    latitude = last_position.get("latitude", 51.276824158421331)
+    longitude = last_position.get("longitude", 30.221928335547232)
 
     return {
-      "amap1Key": params.get("AMapKey1", encoding="utf8") or "",
-      "amap2Key": params.get("AMapKey2", encoding="utf8") or "",
+      "amap1KeySet": bool(params.get("AMapKey1", encoding="utf8")),
+      "amap2KeySet": bool(params.get("AMapKey2", encoding="utf8")),
       "destination": params.get("NavDestination", encoding="utf8") or "",
       "isMetric": params.get_bool("IsMetric"),
       "lastPosition": {
-        "latitude": str(last_position["latitude"]),
-        "longitude": str(last_position["longitude"])
+        "latitude": str(latitude),
+        "longitude": str(longitude)
       },
       "mapboxPublic": params.get("MapboxPublicKey", encoding="utf8") or "",
-      "mapboxSecret": params.get("MapboxSecretKey", encoding="utf8") or "",
+      "mapboxSecretSet": bool(params.get("MapboxSecretKey", encoding="utf8")),
       "previousDestinations": params.get("ApiCache_NavDestinations", encoding="utf8") or "",
     }
 
   @app.route("/api/navigation", methods=["POST"])
   def set_navigation():
-    params.remove("NavDestination")
-
-    time.sleep(1)
-
-    params.put("NavDestination", json.dumps(request.json))
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+      return jsonify({"error": "Invalid destination"}), 400
+    name = payload.get("name")
+    if name is not None and not helpers.is_safe_display_name(name):
+      return jsonify({"error": "Invalid destination name"}), 400
+    params.put("NavDestination", json.dumps(payload))
     return {"message": "Destination set"}
 
   @app.route("/api/navigation/favorite", methods=["DELETE"])
   def remove_favorite_destination():
-    to_remove = request.json or {}
+    to_remove = request.get_json(silent=True) or {}
 
-    existing = json.loads(params.get("FavoriteDestinations", encoding="utf8") or "[]")
-    fid = to_remove.get("id")
-    if fid:
-      favorites = [f for f in existing if f.get("id") != fid]
-    else:
-      favorites = [
-        f for f in existing
-        if not (
-          f.get("routeId") == to_remove.get("routeId") and
-          f.get("latitude") == to_remove.get("latitude") and
-          f.get("longitude") == to_remove.get("longitude") and
-          f.get("name") == to_remove.get("name")
-        )
-      ]
-
-    params.put("FavoriteDestinations", json.dumps(favorites))
+    with _PARAMS_LOCK:
+      existing = json.loads(params.get("FavoriteDestinations", encoding="utf8") or "[]")
+      fid = to_remove.get("id")
+      if fid:
+        favorites = [f for f in existing if (f.get("id") or _favorite_id(f)) != fid]
+      else:
+        favorites = [
+          f for f in existing
+          if not (
+            f.get("routeId") == to_remove.get("routeId") and
+            f.get("latitude") == to_remove.get("latitude") and
+            f.get("longitude") == to_remove.get("longitude") and
+            f.get("name") == to_remove.get("name")
+          )
+        ]
+      params.put("FavoriteDestinations", json.dumps(favorites))
     return jsonify(message="Destination removed from favorites!")
 
   @app.route("/api/navigation/favorite", methods=["GET"])
   def list_favorite_destinations():
-    favorites = json.loads(params.get("FavoriteDestinations", encoding="utf8") or "[]")
-    changed = False
+    with _PARAMS_LOCK:
+      favorites = json.loads(params.get("FavoriteDestinations", encoding="utf8") or "[]")
     for f in favorites:
-      if "id" not in f:
-        raw = f"{f.get('longitude')},{f.get('latitude')}|{f.get('routeId') or ''}|{f.get('name') or ''}"
-        f["id"] = hashlib.sha1(raw.encode()).hexdigest()
-        changed = True
-    if changed:
-      params.put("FavoriteDestinations", json.dumps(favorites))
+      f.setdefault("id", _favorite_id(f))
     return jsonify(favorites=favorites)
 
   @app.route("/api/navigation/favorite", methods=["POST"])
   def add_favorite_destination():
     new_fav = request.json or {}
 
-    if "id" not in new_fav:
-      raw = f"{new_fav.get('longitude')},{new_fav.get('latitude')}|{new_fav.get('routeId') or ''}|{new_fav.get('name') or ''}"
-      new_fav["id"] = hashlib.sha1(raw.encode()).hexdigest()
+    name = new_fav.get("name")
+    if name is not None and not helpers.is_safe_display_name(name):
+      return jsonify({"error": "Invalid favorite name"}), 400
 
-    existing = json.loads(params.get("FavoriteDestinations", encoding="utf8") or "[]")
-    if not any(f.get("id") == new_fav["id"] for f in existing):
-      existing.append(new_fav)
+    new_fav.setdefault("id", _favorite_id(new_fav))
 
-    params.put("FavoriteDestinations", json.dumps(existing))
+    with _PARAMS_LOCK:
+      existing = json.loads(params.get("FavoriteDestinations", encoding="utf8") or "[]")
+      if not any(f.get("id") == new_fav["id"] for f in existing):
+        existing.append(new_fav)
+      params.put("FavoriteDestinations", json.dumps(existing))
     return {"message": "Destination added to favorites!"}
 
   @app.route("/api/navigation/favorite/rename", methods=["POST"])
@@ -228,47 +369,53 @@ def setup(app):
     if not fid and not route_id_to_rename:
       return jsonify({"error": "Missing id or routeId"}), 400
 
-    existing_favorites = json.loads(params.get("FavoriteDestinations", encoding="utf8") or "[]")
+    if new_name is not None and not helpers.is_safe_display_name(new_name):
+      return jsonify({"error": "Invalid favorite name"}), 400
 
-    if is_home:
+    with _PARAMS_LOCK:
+      existing_favorites = json.loads(params.get("FavoriteDestinations", encoding="utf8") or "[]")
+
+      if is_home:
+        for favorite in existing_favorites:
+          favorite.pop("is_home", None)
+      if is_work:
+        for favorite in existing_favorites:
+          favorite.pop("is_work", None)
+
+      found = False
       for favorite in existing_favorites:
-        favorite.pop("is_home", None)
-    if is_work:
-      for favorite in existing_favorites:
-        favorite.pop("is_work", None)
+        if (fid and favorite.get("id") == fid) or (not fid and favorite.get("routeId") == route_id_to_rename):
+          if new_name:
+            favorite["name"] = new_name
 
-    found = False
-    for favorite in existing_favorites:
-      if (fid and favorite.get("id") == fid) or (not fid and favorite.get("routeId") == route_id_to_rename):
-        if new_name:
-          favorite["name"] = new_name
+          if is_home is not None:
+            if is_home:
+              favorite["is_home"] = True
+              favorite.pop("is_work", None)
+            else:
+              favorite.pop("is_home", None)
 
-        if is_home is not None:
-          if is_home:
-            favorite["is_home"] = True
-            favorite.pop("is_work", None)
-          else:
-            favorite.pop("is_home", None)
+          if is_work is not None:
+            if is_work:
+              favorite["is_work"] = True
+              favorite.pop("is_home", None)
+            else:
+              favorite.pop("is_work", None)
 
-        if is_work is not None:
-          if is_work:
-            favorite["is_work"] = True
-            favorite.pop("is_home", None)
-          else:
-            favorite.pop("is_work", None)
+          found = True
+          break
 
-        found = True
-        break
+      if not found:
+        return jsonify({"error": "Favorite not found"}), 404
 
-    if not found:
-      return jsonify({"error": "Favorite not found"}), 404
-
-    params.put("FavoriteDestinations", json.dumps(existing_favorites))
+      params.put("FavoriteDestinations", json.dumps(existing_favorites))
     return jsonify(message="Favorite updated successfully!")
 
   @app.route("/api/navigation_key", methods=["DELETE"])
   def delete_navigation_key():
     meta = KEYS.get(request.args.get("type"))
+    if not meta:
+      return jsonify(error="Unknown key type"), 400
     params.remove(meta[2])
     return jsonify(message=f"{meta[3]} deleted successfully!")
 
@@ -296,11 +443,17 @@ def setup(app):
 
   @app.route("/api/params", methods=["GET"])
   def get_param():
-    return params.get(request.args.get("key")) or "", 200
+    key = request.args.get("key")
+    if key not in helpers.PARAM_GET_ALLOWLIST:
+      return jsonify({"error": "Forbidden"}), 403
+    return params.get(key) or "", 200
 
   @app.route("/api/params_memory", methods=["GET"])
   def get_param_memory():
-    return params_memory.get(request.args.get("key")) or "", 200
+    key = request.args.get("key")
+    if key not in helpers.PARAM_MEMORY_GET_ALLOWLIST:
+      return jsonify({"error": "Forbidden"}), 403
+    return params_memory.get(key) or "", 200
 
   @app.route("/api/routes", methods=["GET"])
   def list_routes():
@@ -308,65 +461,34 @@ def setup(app):
       routes = [(path, name) for path in FOOTAGE_PATHS for name in utilities.get_routes_names(path)]
       total = len(routes)
       yield f"data: {json.dumps({'progress': 0, 'total': total})}\n\n"
+      for processed, (path, name) in enumerate(routes, start=1):
+        try:
+          result = utilities.route_metadata(path, name)
+          yield f"data: {json.dumps({'routes': [result]})}\n\n"
+        except Exception:
+          cloudlog.exception(f"the_pond list_routes: failed to process route {name}")
+        yield f"data: {json.dumps({'progress': processed, 'total': total})}\n\n"
 
-      with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = {executor.submit(utilities.process_route, path, name): (path, name) for path, name in routes}
-        for processed, future in enumerate(as_completed(futures), start=1):
-          try:
-            result = future.result()
-            yield f"data: {json.dumps({'routes': [result]})}\n\n"
-
-            path, name = futures[future]
-            segments = utilities.get_segments_in_route(name, path)
-            if segments:
-              for camera, cam_file in {
-                "forward": "fcamera.hevc",
-                "wide": "ecamera.hevc",
-                "driver": "dcamera.hevc"
-              }.items():
-                input_files = [
-                  os.path.join(path, seg, cam_file)
-                  for seg in segments
-                  if os.path.exists(os.path.join(path, seg, cam_file))
-                ]
-                if input_files:
-                  executor.submit(
-                    utilities.ffmpeg_concat_segments_to_mp4,
-                    input_files,
-                    f"{name}-{camera}"
-                  )
-
-          except Exception as exception:
-            print(f"Error processing route: {exception}")
-          yield f"data: {json.dumps({'progress': processed, 'total': total})}\n\n"
-
-        for path, name in routes:
-          utilities.process_route_gif(path, name)
-
-    return Response(generate(), mimetype="text/event-stream")
+    return Response(stream_with_context(generate()), mimetype="text/event-stream")
 
   @app.route("/api/routes/<name>", methods=["DELETE"])
   def delete_route(name):
+    deleted = False
     for footage_path in FOOTAGE_PATHS:
       for segment in os.listdir(footage_path):
-        if segment.startswith(name):
+        if segment == name or segment.startswith(name + "--"):
           delete_file(os.path.join(footage_path, segment))
+          deleted = True
+    if not deleted:
+      return {"error": "Route not found"}, 404
     return {"message": "Route deleted!"}, 200
 
   @app.route("/api/routes/delete_all", methods=["DELETE"])
   def delete_all_routes():
-    route_names = set()
     for footage_path in FOOTAGE_PATHS:
       if os.path.exists(footage_path):
         for segment in os.listdir(footage_path):
-          route_names.add(segment.split("--")[0])
-
-    for route_name in sorted(list(route_names)):
-      for footage_path in FOOTAGE_PATHS:
-        if os.path.exists(footage_path):
-          for segment in os.listdir(footage_path):
-            if segment.startswith(route_name):
-              delete_file(os.path.join(footage_path, segment))
+          delete_file(os.path.join(footage_path, segment))
 
     return {"message": "All routes deleted!"}, 200
 
@@ -395,7 +517,7 @@ def setup(app):
   def un_preserve_route(name):
     for footage_path in FOOTAGE_PATHS:
       route_path = os.path.join(footage_path, f"{name}--0")
-      if PRESERVE_ATTR_NAME in os.listxattr(route_path):
+      if os.path.exists(route_path) and PRESERVE_ATTR_NAME in os.listxattr(route_path):
         os.removexattr(route_path, PRESERVE_ATTR_NAME)
         return {"message": "Route unpreserved!"}, 200
     return {"error": "Route not found"}, 404
@@ -422,26 +544,26 @@ def setup(app):
           return {"error": "No video files found"}, 404
 
         mp4_file = utilities.ffmpeg_concat_segments_to_mp4(input_files, cache_key=f"{name}-{camera}")
-        return send_file(mp4_file, mimetype="video/mp4")
+        return send_file(mp4_file, mimetype="video/mp4", conditional=True)
 
     return {"error": "Route not found"}, 404
 
   @app.route("/api/routes/<name>", methods=["GET"])
   def get_route(name):
     for footage_path in FOOTAGE_PATHS:
-      base_path = f"{footage_path}{name}--0"
+      base_path = os.path.join(footage_path, f"{name}--0")
       if os.path.exists(base_path):
         segments = utilities.get_segments_in_route(name, footage_path)
         if not segments:
           break
 
         segment_urls = [f"/video/{segment}" for segment in segments]
-        total_duration = sum(utilities.get_video_duration(f"{footage_path}{name}--{i}/fcamera.hevc") for i in range(len(segment_urls)))
+        total_duration = sum(utilities.get_video_duration(os.path.join(footage_path, f"{name}--{i}", "fcamera.hevc")) for i in range(len(segment_urls)))
         return {
           "name": name,
           "segment_urls": segment_urls,
           "total_duration": round(total_duration),
-          "date": utilities.get_route_start_time(footage_path),
+          "date": utilities.get_route_start_time(os.path.join(base_path, "rlog")),
           "available_cameras": utilities.get_available_cameras(base_path),
         }, 200
     return {"error": "Route not found"}, 404
@@ -460,7 +582,7 @@ def setup(app):
       if not os.path.exists(footage_path):
         continue
 
-      segments_to_process = [s for s in os.listdir(footage_path) if s.startswith(route_name) and os.path.isdir(os.path.join(footage_path, s))]
+      segments_to_process = [s for s in os.listdir(footage_path) if helpers.route_segment_matches(s, route_name) and os.path.isdir(os.path.join(footage_path, s))]
       if not segments_to_process:
         continue
 
@@ -494,20 +616,25 @@ def setup(app):
       return jsonify({"error": "Missing old or new name"}), 400
 
     new_name = secure_filename(new_name_raw)
+    if not new_name:
+      return jsonify({"error": "Invalid new name"}), 400
     renamed = False
+    had_segments = False
+    write_error = False
 
     for footage_path in FOOTAGE_PATHS:
       if not os.path.exists(footage_path):
         continue
 
-      segments_to_process = [s for s in os.listdir(footage_path) if s.startswith(old_name) and os.path.isdir(os.path.join(footage_path, s))]
+      segments_to_process = [s for s in os.listdir(footage_path) if helpers.route_segment_matches(s, old_name) and os.path.isdir(os.path.join(footage_path, s))]
       if not segments_to_process:
         continue
+      had_segments = True
 
       for segment in segments_to_process:
         segment_dir = os.path.join(footage_path, segment)
         for item in os.listdir(segment_dir):
-          if not item.endswith((".hevc", ".ts", ".png", ".gif", "rlog")):
+          if not item.endswith((".hevc", ".ts", ".png", ".gif")) and item not in utilities.LOG_CANDIDATES:
             try:
               os.remove(os.path.join(segment_dir, item))
             except OSError:
@@ -522,16 +649,20 @@ def setup(app):
             os.utime(new_name_file_path, None)
           renamed = True
         except OSError as e:
-          return jsonify({"error": f"Error creating new name file: {e}"}), 500
+          write_error = True
+          cloudlog.exception(f"the_pond rename_route: could not write name marker in {segment_dir}: {e}")
 
     if renamed:
       return jsonify({"message": "Route renamed successfully!"}), 200
-    else:
-      return jsonify({"error": "Route not found"}), 404
+    if had_segments and write_error:
+      return jsonify({"error": "Could not rename route"}), 500
+    return jsonify({"error": "Route not found"}), 404
 
   @app.route("/api/screen_recordings/delete/<path:filename>", methods=["DELETE"])
   def delete_screen_recording(filename):
     mp4_path = SCREEN_RECORDINGS_PATH / filename
+    if not helpers.is_within(SCREEN_RECORDINGS_PATH, mp4_path):
+      return {"error": "Forbidden"}, 403
     if not mp4_path.exists():
       return {"error": "File not found"}, 404
 
@@ -557,6 +688,8 @@ def setup(app):
 
   @app.route("/api/screen_recordings/download/<path:filename>", methods=["GET"])
   def download_screen_recording(filename):
+    if not helpers.is_within(SCREEN_RECORDINGS_PATH, SCREEN_RECORDINGS_PATH / filename):
+      return {"error": "Forbidden"}, 403
     return send_from_directory(SCREEN_RECORDINGS_PATH, filename, as_attachment=True)
 
   @app.route("/api/screen_recordings/list", methods=["GET"])
@@ -570,37 +703,41 @@ def setup(app):
       total = len(recordings)
 
       yield f"data: {json.dumps({'progress': 0, 'total': total})}\n\n"
+      for processed, mp4 in enumerate(recordings, start=1):
+        try:
+          result = utilities.screen_recording_metadata(mp4)
+          yield f"data: {json.dumps({'recordings': [result]})}\n\n"
+        except Exception:
+          cloudlog.exception(f"the_pond list_screen_recordings: failed to process {mp4.name}")
+        yield f"data: {json.dumps({'progress': processed, 'total': total})}\n\n"
 
-      with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = {executor.submit(utilities.process_screen_recording, mp4): mp4 for mp4 in recordings}
-        for processed, future in enumerate(as_completed(futures), start=1):
-          try:
-            result = future.result()
-            yield f"data: {json.dumps({'recordings': [result]})}\n\n"
-          except Exception as exception:
-            print(f"Error processing recording: {exception}")
-
-          yield f"data: {json.dumps({'progress': processed, 'total': total})}\n\n"
-
-        for recording in recordings:
-          utilities.process_screen_recording_gif(recording)
-
-    return Response(generate(), mimetype="text/event-stream")
+    return Response(stream_with_context(generate()), mimetype="text/event-stream")
 
   @app.route("/screen_recordings/<path:filename>", methods=["GET"])
   def serve_screen_recording_asset(filename):
+    asset = SCREEN_RECORDINGS_PATH / filename
+    if helpers.is_within(SCREEN_RECORDINGS_PATH, asset) and not asset.exists() and asset.suffix in (".png", ".gif"):
+      mp4 = asset.with_suffix(".mp4")
+      if mp4.exists():
+        if asset.suffix == ".png":
+          utilities.video_to_png(mp4, asset)
+        else:
+          utilities.video_to_gif(mp4, asset)
     return send_from_directory(SCREEN_RECORDINGS_PATH, filename)
 
   @app.route("/api/screen_recordings/rename", methods=["POST"])
   def rename_screen_recording():
     data = request.get_json() or {}
     old = data.get("old")
-    new_raw = data.get("new")
+    new_raw = data.get("new") or ""
 
     if not old or not new_raw:
       return {"error": "Missing filenames"}, 400
 
-    new = secure_filename(new_raw)
+    stem = secure_filename(new_raw[:-4] if new_raw.lower().endswith(".mp4") else new_raw)
+    if not stem:
+      return {"error": "Invalid new name"}, 400
+    new = f"{stem}.mp4"
     old_path = SCREEN_RECORDINGS_PATH / old
     new_path = SCREEN_RECORDINGS_PATH / new
 
@@ -620,13 +757,20 @@ def setup(app):
 
     return {"message": "Renamed"}, 200
 
-  @app.route("/api/speed_limits", methods=["GET"])
+  @app.route("/api/speed_limits", methods=["POST"])
   def speed_limits():
-    data = json.loads(params.get("SpeedLimitsFiltered") or "[]")
-    current_time = (datetime.now(timezone.utc) - timedelta(days=6, hours=23)).isoformat()
-    data = [{**e, "last_vetted": current_time} for e in data]
+    try:
+      data = json.loads(params.get("SpeedLimitsFiltered") or "[]")
+    except (ValueError, TypeError):
+      data = []
+    if not isinstance(data, list):
+      data = []
 
-    params.put("SpeedLimitsFiltered", json.dumps(data))
+    current_time = (datetime.now(timezone.utc) - timedelta(days=6, hours=23)).isoformat()
+    data = [{**e, "last_vetted": current_time} for e in data if isinstance(e, dict)]
+
+    with _PARAMS_LOCK:
+      params.put("SpeedLimitsFiltered", json.dumps(data))
 
     buffer = BytesIO(json.dumps(data, indent=2).encode())
     buffer.seek(0)
@@ -643,22 +787,16 @@ def setup(app):
       env = "Release"
     elif short_branch == "FrogPilot-Testing":
       env = "Testing"
+    elif short_branch == "FrogPilot-Vetting":
+      env = "Vetting"
     elif build_metadata.tested_channel:
       env = "Staging"
     else:
       env = short_branch
 
-    try:
-      response = requests.get(f"https://api.comma.ai/v1/devices/{params.get('DongleId', encoding='utf8')}/firehose_stats", timeout=10)
-      response.raise_for_status()
-      firehose_stats = response.json().get("firehose", 0)
-    except (requests.RequestException, ValueError) as e:
-      firehose_stats = 0
-
     return {
       "diskUsage": utilities.get_disk_usage(),
       "driveStats": utilities.get_drive_stats(),
-      "firehoseStats": {"segments": firehose_stats},
       "softwareInfo": {
         "branchName": build_metadata.channel,
         "buildEnvironment": env,
@@ -671,7 +809,7 @@ def setup(app):
 
   @app.route("/api/tailscale/installed", methods=["GET"])
   def tailscale_installed():
-    base = "/data/tailscale"
+    base = TAILSCALE_BASE
     tailscale_binary = f"{base}/tailscale"
     tailscaled_binary = f"{base}/tailscaled"
 
@@ -680,7 +818,10 @@ def setup(app):
     if os.path.exists(tailscale_binary) and os.path.exists(tailscaled_binary) and os.path.exists(systemd_unit):
       return jsonify({"installed": True})
 
-    result = subprocess.run(["which", "tailscale"], capture_output=True, text=True)
+    try:
+      result = subprocess.run(["which", "tailscale"], capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired:
+      return jsonify({"installed": False})
     if result.returncode == 0:
       return jsonify({"installed": True})
 
@@ -688,15 +829,22 @@ def setup(app):
 
   @app.route("/api/tailscale/setup", methods=["POST"])
   def tailscale_setup():
+    cloudlog.warning("the_pond audit: tailscale setup (sudo install systemd unit) requested")
     arch = "arm64"
-    base = "/data/tailscale"
+    base = TAILSCALE_BASE
 
-    result = subprocess.run(
-      "curl -s https://pkgs.tailscale.com/stable/ | grep -oP 'tailscale_\\K[0-9]+\\.[0-9]+\\.[0-9]+' | sort -V | tail -1",
-      shell=True, capture_output=True, text=True
-    )
+    version = "1.84.0"
+    try:
+      idx = requests.get("https://pkgs.tailscale.com/stable/", timeout=15)
+      idx.raise_for_status()
+      found = re.findall(r"tailscale_(\d+\.\d+\.\d+)_", idx.text)
+      if found:
+        version = max(found, key=lambda v: tuple(map(int, v.split("."))))
+    except requests.RequestException:
+      pass
 
-    version = result.stdout.strip() or "1.84.0"
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+      return jsonify({"error": "Could not determine a valid Tailscale version"}), 502
 
     bin_dir = f"{base}/tailscale_{version}_{arch}"
     state = f"{base}/state"
@@ -707,13 +855,29 @@ def setup(app):
 
     os.makedirs(state, exist_ok=True)
 
-    run_cmd(["curl", "-fsSL", tgz_url, "-o", tgz_path], "Downloaded Tailscale archive.", "Failed to download Tailscale archive.")
+    _run_cmd(["curl", "-fsSL", "--connect-timeout", "15", "--max-time", "300", tgz_url, "-o", tgz_path],
+             "Downloaded Tailscale archive.", "Failed to download Tailscale archive.", timeout=320)
+    if not os.path.exists(tgz_path):
+      return jsonify({"error": "Failed to download Tailscale archive"}), 502
+
+    try:
+      sums = requests.get(tgz_url + ".sha256", timeout=15)
+      sums.raise_for_status()
+      expected = sums.text.strip().split()[0].lower()
+    except (requests.RequestException, IndexError):
+      delete_file(tgz_path)
+      return jsonify({"error": "Could not fetch Tailscale checksum; aborting"}), 502
+
+    digest = hashlib.sha256(Path(tgz_path).read_bytes()).hexdigest().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected) or digest != expected:
+      delete_file(tgz_path)
+      return jsonify({"error": "Tailscale archive checksum mismatch; aborting"}), 502
 
     extract_tar(tgz_path, base)
 
-    run_cmd(["cp", f"{bin_dir}/tailscale", f"{base}/tailscale"], "Copied tailscale binary.", "Failed to copy tailscale binary.")
-    run_cmd(["cp", f"{bin_dir}/tailscaled", f"{base}/tailscaled"], "Copied tailscaled binary.", "Failed to copy tailscaled binary.")
-    run_cmd(["chmod", "+x", f"{base}/tailscale", f"{base}/tailscaled"], "Made binaries executable.", "Failed to chmod binaries.")
+    _run_cmd(["cp", f"{bin_dir}/tailscale", f"{base}/tailscale"], "Copied tailscale binary.", "Failed to copy tailscale binary.")
+    _run_cmd(["cp", f"{bin_dir}/tailscaled", f"{base}/tailscaled"], "Copied tailscaled binary.", "Failed to copy tailscaled binary.")
+    _run_cmd(["chmod", "+x", f"{base}/tailscale", f"{base}/tailscaled"], "Made binaries executable.", "Failed to chmod binaries.")
 
     systemd_unit = f"""[Unit]
     Description=Tailscale node agent
@@ -736,11 +900,14 @@ def setup(app):
     with open(unit_tmp, "w") as f:
       f.write(systemd_unit)
 
-    run_cmd(["sudo", "mount", "-o", "remount,rw", "/"], "Remounted / as read-write.", "Failed to remount / as read-write.")
-    run_cmd(["sudo", "install", "-m", "644", unit_tmp, "/etc/systemd/system/tailscaled.service"], "Installed systemd unit.", "Failed to install systemd unit.")
-    run_cmd(["sudo", "systemctl", "daemon-reload"], "Reloaded systemd daemon.", "Failed to reload systemd daemon.")
-    run_cmd(["sudo", "systemctl", "enable", "/etc/systemd/system/tailscaled.service"], "Enabled tailscaled service.", "Failed to enable tailscaled service.")
-    run_cmd(["sudo", "systemctl", "restart", "tailscaled"], "Started tailscaled service.", "Failed to start tailscaled service.")
+    try:
+      _run_cmd(["sudo", "mount", "-o", "remount,rw", "/"], "Remounted / as read-write.", "Failed to remount / as read-write.")
+      _run_cmd(["sudo", "install", "-m", "644", unit_tmp, "/etc/systemd/system/tailscaled.service"], "Installed systemd unit.", "Failed to install systemd unit.")
+      _run_cmd(["sudo", "systemctl", "daemon-reload"], "Reloaded systemd daemon.", "Failed to reload systemd daemon.")
+      _run_cmd(["sudo", "systemctl", "enable", "/etc/systemd/system/tailscaled.service"], "Enabled tailscaled service.", "Failed to enable tailscaled service.")
+      _run_cmd(["sudo", "systemctl", "restart", "tailscaled"], "Started tailscaled service.", "Failed to start tailscaled service.")
+    finally:
+      _run_cmd(["sudo", "mount", "-o", "remount,ro", "/"], "Remounted / read-only.", "Failed to remount / read-only -- filesystem may be left writable.")
 
     proc = subprocess.Popen(
       ["sudo", f"{base}/tailscale", "--socket", socket, "up", "--hostname", f"{HARDWARE.get_device_type()}-the-pond"],
@@ -750,14 +917,28 @@ def setup(app):
       preexec_fn=os.setsid
     )
 
+    def _terminate():
+      _run_cmd(["sudo", "kill", "-TERM", f"-{proc.pid}"], "Sent SIGTERM to Tailscale setup process.", "Failed to send SIGTERM to Tailscale setup process.")
+
+    watchdog = threading.Timer(60, _terminate)
+    watchdog.start()
     auth_url = None
-    for line in proc.stdout:
-      match = re.search(r"https://login\.tailscale\.com/\S+", line)
-      if match and not auth_url:
-        auth_url = match.group(0)
-        run_cmd(["sudo", "kill", "-TERM", f"-{proc.pid}"], "Sent SIGTERM to Tailscale setup process.", "Failed to send SIGTERM to Tailscale setup process.")
+    try:
+      for line in (proc.stdout or []):
+        match = re.search(r"https://login\.tailscale\.com/\S+", line)
+        if match:
+          auth_url = match.group(0)
+          break
+    finally:
+      watchdog.cancel()
+      _terminate()
+      try:
         proc.wait(timeout=5)
-        break
+      except subprocess.TimeoutExpired:
+        cloudlog.warning("the_pond tailscale_setup: tailscale up did not exit after SIGTERM")
+
+    if not auth_url:
+      return jsonify({"error": "Tailscale did not return an authentication URL. Please try again."}), 504
 
     return jsonify({
       "message": "Tailscale setup started. Please authenticate in your browser.",
@@ -766,18 +947,22 @@ def setup(app):
 
   @app.route("/api/tailscale/uninstall", methods=["POST"])
   def tailscale_uninstall():
-    base = "/data/tailscale"
+    cloudlog.warning("the_pond audit: tailscale uninstall (sudo rm -rf / systemctl) requested")
+    base = TAILSCALE_BASE
     state = f"{base}/state"
     unit_path = "/etc/systemd/system/tailscaled.service"
     local_unit = f"{base}/tailscaled.service"
 
-    run_cmd(["sudo", "mount", "-o", "remount,rw", "/"], "Remounted / as read-write.", "Failed to remount /.")
-    run_cmd(["sudo", "systemctl", "stop", "tailscaled"], "Stopped tailscaled.", "Failed to stop tailscaled.")
-    run_cmd(["sudo", "systemctl", "disable", "tailscaled"], "Disabled tailscaled.", "Failed to disable tailscaled.")
+    _run_cmd(["sudo", "systemctl", "stop", "tailscaled"], "Stopped tailscaled.", "Failed to stop tailscaled.")
+    _run_cmd(["sudo", "systemctl", "disable", "tailscaled"], "Disabled tailscaled.", "Failed to disable tailscaled.")
 
     if os.path.exists(unit_path):
-      run_cmd(["sudo", "rm", unit_path], "Removed systemd unit file.", "Failed to remove systemd unit file.")
-      run_cmd(["sudo", "systemctl", "daemon-reload"], "Reloaded systemd daemon.", "Failed to reload systemd.")
+      try:
+        _run_cmd(["sudo", "mount", "-o", "remount,rw", "/"], "Remounted / as read-write.", "Failed to remount /.")
+        _run_cmd(["sudo", "rm", unit_path], "Removed systemd unit file.", "Failed to remove systemd unit file.")
+      finally:
+        _run_cmd(["sudo", "mount", "-o", "remount,ro", "/"], "Remounted / read-only.", "Failed to remount / read-only -- filesystem may be left writable.")
+      _run_cmd(["sudo", "systemctl", "daemon-reload"], "Reloaded systemd daemon.", "Failed to reload systemd.")
 
     delete_file(local_unit)
 
@@ -788,13 +973,13 @@ def setup(app):
       if item.startswith("tailscale_"):
         item_path = os.path.join(base, item)
         if os.path.isdir(item_path):
-          run_cmd(["sudo", "rm", "-rf", item_path], f"Removed {item_path}.", f"Failed to remove {item_path}.")
+          _run_cmd(["sudo", "rm", "-rf", item_path], f"Removed {item_path}.", f"Failed to remove {item_path}.")
 
     if os.path.exists(state):
-      run_cmd(["sudo", "rm", "-rf", state], "Removed tailscale state dir.", "Failed to remove tailscale state dir.")
+      _run_cmd(["sudo", "rm", "-rf", state], "Removed tailscale state dir.", "Failed to remove tailscale state dir.")
 
     if os.path.exists(base):
-      run_cmd(["sudo", "rm", "-rf", base], "Removed tailscale dir.", "Failed to remove tailscale dir.")
+      _run_cmd(["sudo", "rm", "-rf", base], "Removed tailscale dir.", "Failed to remove tailscale dir.")
 
     return jsonify({"message": "Tailscale uninstalled!"}), 200
 
@@ -819,6 +1004,8 @@ def setup(app):
       return jsonify({"error": "Unknown component"}), 400
 
     slug = display_name.lower().replace("(", "").replace(")", "").replace(" ", "_")
+    if "/" in slug or "\\" in slug or ".." in slug:
+      return jsonify({"error": "Invalid component name"}), 400
 
     params_memory.put(mem_key, slug)
     params_memory.put("ThemeDownloadProgress", "Downloading...")
@@ -836,6 +1023,14 @@ def setup(app):
     temp_path, error = utilities.create_theme(form_data, files, temporary=True)
     if error:
       return {"error": error}, 400
+
+    persistent_source = THEME_SAVE_PATH / "active_theme_source"
+    if persistent_source.exists() or persistent_source.is_symlink():
+      delete_file(persistent_source)
+    persistent_source.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(temp_path, persistent_source, symlinks=False)
+    delete_file(temp_path.parent)
+    temp_path = persistent_source
 
     save_checklist = json.loads(form_data.get("saveChecklist", "{}"))
 
@@ -916,6 +1111,12 @@ def setup(app):
       base_dir = HOLIDAY_THEME_PATH / theme if "holiday" in theme_type else THEME_SAVE_PATH / "theme_packs" / theme
       file_path = base_dir / asset_path
 
+    file_path = Path(file_path).resolve()
+    roots = (Path(ACTIVE_THEME_PATH).resolve(), Path(THEME_SAVE_PATH).resolve(),
+             Path(HOLIDAY_THEME_PATH).resolve())
+    if not any(helpers.is_within(root, file_path) for root in roots):
+      return "Forbidden", 403
+
     if not file_path.exists():
       return "File not found", 404
 
@@ -930,13 +1131,19 @@ def setup(app):
       return jsonify({"message": "Cannot delete holiday themes."}), 403
 
     if theme_type == "steering_wheel":
-      wheel_path = THEME_SAVE_PATH / "steering_wheels" / theme_path_str
+      wheels_root = THEME_SAVE_PATH / "steering_wheels"
+      wheel_path = wheels_root / theme_path_str
+      if not helpers.is_within(wheels_root, wheel_path):
+        return jsonify({"message": "Forbidden"}), 403
       if wheel_path.exists():
         delete_file(wheel_path)
         return jsonify({"message": f'Steering wheel "{utilities.normalize_theme_name(wheel_path.stem)}" deleted!'}), 200
       return jsonify({"message": "Steering wheel not found..."}), 404
 
-    theme_path = THEME_SAVE_PATH / "theme_packs" / theme_path_str
+    packs_root = THEME_SAVE_PATH / "theme_packs"
+    theme_path = packs_root / theme_path_str
+    if not helpers.is_within(packs_root, theme_path):
+      return jsonify({"message": "Forbidden"}), 403
     if not theme_path.is_dir():
       return jsonify({"message": "Theme not found..."}), 404
 
@@ -993,8 +1200,11 @@ def setup(app):
 
     colors_path = ACTIVE_THEME_PATH / "colors" / "colors.json"
     if colors_path.exists():
-      with open(colors_path, "r") as f:
-        theme_data["colors"] = json.load(f)
+      try:
+        with open(colors_path, "r") as f:
+          theme_data["colors"] = json.load(f)
+      except (OSError, ValueError):
+        cloudlog.exception("the_pond get_default_theme: failed to read active colors.json")
 
     signals_dir = ACTIVE_THEME_PATH / "signals"
     if signals_dir.exists():
@@ -1007,7 +1217,7 @@ def setup(app):
       theme_data["turnSignalLength"] = 100
 
       for file in os.listdir(signals_dir):
-        if not any(file.endswith(ext) for ext in [".png", ".gif", ".jpg", ".jpeg"]):
+        if not any(file.endswith(ext) for ext in utilities.IMAGE_EXTS):
           parts = file.split("_")
           if len(parts) == 2:
             theme_data["turnSignalStyle"] = parts[0].capitalize()
@@ -1017,17 +1227,10 @@ def setup(app):
               pass
           break
 
-      exts = [".png", ".gif", ".jpg", ".jpeg"]
-      for ext in exts:
-        p = signals_dir / f"turn_signal{ext}"
-        if p.exists():
-          theme_data["images"]["turnSignal"] = f"turn_signal{ext}"
-          break
-      for ext in exts:
-        p = signals_dir / f"turn_signal_blindspot{ext}"
-        if p.exists():
-          theme_data["images"]["turnSignalBlindspot"] = f"turn_signal_blindspot{ext}"
-          break
+      if turn_signal := utilities.first_image(signals_dir, "turn_signal"):
+        theme_data["images"]["turnSignal"] = turn_signal
+      if blindspot := utilities.first_image(signals_dir, "turn_signal_blindspot"):
+        theme_data["images"]["turnSignalBlindspot"] = blindspot
 
     icons_path = ACTIVE_THEME_PATH / "icons"
     if icons_path.exists() and icons_path.is_dir():
@@ -1048,15 +1251,14 @@ def setup(app):
       theme_data["images"]["distanceIcons"] = {}
       for file in os.listdir(distance_icons_path):
         key = Path(file).stem
-        if key in ["traffic", "aggressive", "standard", "relaxed"]:
+        if key in utilities.DISTANCE_ICON_NAMES:
           theme_data["images"]["distanceIcons"][key] = file
 
     sounds_path = ACTIVE_THEME_PATH / "sounds"
     if sounds_path.exists() and sounds_path.is_dir():
-      valid_sound_keys = ["engage", "disengage", "prompt", "startup"]
       for file in os.listdir(sounds_path):
         stem = Path(file).stem
-        if stem in valid_sound_keys:
+        if stem in utilities.SOUND_NAMES:
           theme_data["sounds"][stem] = file
 
     return jsonify(theme_data)
@@ -1121,12 +1323,15 @@ def setup(app):
           "hasSteeringWheel": True,
         })
 
-    return jsonify({"themes": sorted(all_themes, key=lambda x: x['name'])})
+    return jsonify({"themes": sorted(all_themes, key=lambda x: x["name"])})
 
   @app.route("/api/themes/load/<path:theme_path>")
   def load_theme(theme_path):
     theme_type = request.args.get("type", "")
-    theme_dir = HOLIDAY_THEME_PATH / theme_path if "holiday" in theme_type else THEME_SAVE_PATH / "theme_packs" / theme_path
+    theme_root = HOLIDAY_THEME_PATH if "holiday" in theme_type else THEME_SAVE_PATH / "theme_packs"
+    theme_dir = theme_root / theme_path
+    if not helpers.is_within(theme_root, theme_dir):
+      return jsonify({"error": "Forbidden"}), 403
 
     response_data = {
       "colors": None,
@@ -1140,8 +1345,11 @@ def setup(app):
 
     colors_file = theme_dir / "colors" / "colors.json"
     if colors_file.exists():
-      with open(colors_file) as f:
-        response_data["colors"] = json.load(f)
+      try:
+        with open(colors_file) as f:
+          response_data["colors"] = json.load(f)
+      except (OSError, ValueError):
+        cloudlog.exception("the_pond load_theme: failed to read colors.json")
 
     icons_dir = theme_dir / "icons"
     if icons_dir.exists():
@@ -1159,16 +1367,12 @@ def setup(app):
     distance_dir = theme_dir / "distance_icons"
     if distance_dir.exists():
       response_data["images"]["distanceIcons"] = {}
-      exts = [".png", ".gif", ".jpg", ".jpeg"]
-      for name in ["aggressive", "relaxed", "standard", "traffic"]:
-        for ext in exts:
-          p = distance_dir / f"{name}{ext}"
-          if p.exists():
-            response_data["images"]["distanceIcons"][name] = {
-              "filename": f"{name}{ext}",
-              "path": f"distance_icons/{name}{ext}"
-            }
-            break
+      for name in utilities.DISTANCE_ICON_NAMES:
+        if fname := utilities.first_image(distance_dir, name):
+          response_data["images"]["distanceIcons"][name] = {
+            "filename": fname,
+            "path": f"distance_icons/{fname}"
+          }
 
     signals_dir = theme_dir / "signals"
     if signals_dir.exists():
@@ -1181,7 +1385,7 @@ def setup(app):
       response_data["turnSignalLength"] = 100
 
       for file in os.listdir(signals_dir):
-        if not any(file.endswith(ext) for ext in [".png", ".gif", ".jpg", ".jpeg"]):
+        if not any(file.endswith(ext) for ext in utilities.IMAGE_EXTS):
           parts = file.split("_")
           if len(parts) == 2:
             response_data["turnSignalStyle"] = parts[0].capitalize()
@@ -1191,27 +1395,20 @@ def setup(app):
               pass
             break
 
-      exts = [".png", ".gif", ".jpg", ".jpeg"]
-      for ext in exts:
-        p = signals_dir / f"turn_signal{ext}"
-        if p.exists():
-          response_data["images"]["turnSignal"] = {
-            "filename": f"turn_signal{ext}",
-            "path": f"signals/turn_signal{ext}",
-          }
-          break
-      for ext in exts:
-        p = signals_dir / f"turn_signal_blindspot{ext}"
-        if p.exists():
-          response_data["images"]["turnSignalBlindspot"] = {
-            "filename": f"turn_signal_blindspot{ext}",
-            "path": f"signals/turn_signal_blindspot{ext}",
-          }
-          break
+      if turn_signal := utilities.first_image(signals_dir, "turn_signal"):
+        response_data["images"]["turnSignal"] = {
+          "filename": turn_signal,
+          "path": f"signals/{turn_signal}",
+        }
+      if blindspot := utilities.first_image(signals_dir, "turn_signal_blindspot"):
+        response_data["images"]["turnSignalBlindspot"] = {
+          "filename": blindspot,
+          "path": f"signals/{blindspot}",
+        }
 
     sounds_dir = theme_dir / "sounds"
     if sounds_dir.exists():
-      for name in ["engage", "disengage", "startup", "prompt"]:
+      for name in utilities.SOUND_NAMES:
         file_path = sounds_dir / f"{name}.wav"
         if file_path.exists():
           response_data["sounds"][name] = {
@@ -1261,18 +1458,10 @@ def setup(app):
 
       safe_theme_name = utilities.normalize_theme_name(theme_name, for_path=True)
       combined_name = f"{safe_theme_name}~{discord_username}"
-      timestamp = int(time.time())
 
       def gitlab_post(commit_payload):
-        api_token, build_metadata, device_type, dongle_id = get_frogpilot_api_info()
-        payload = {
-          "api_token": api_token,
-          "build_metadata": build_metadata,
-          "device": device_type,
-          "frogpilot_dongle_id": dongle_id,
-          **commit_payload,
-        }
-        resp = requests.post(f"{FROGPILOT_API}/gitlab/commit", json=payload, headers={"Content-Type": "application/json", "User-Agent": "frogpilot-api/1.0"}, timeout=60)
+        resp = requests.post(f"{FROGPILOT_API}/gitlab/commit", json=_frogpilot_api_payload(**commit_payload),
+                             headers={"Content-Type": "application/json", "User-Agent": "frogpilot-api/1.0"}, timeout=60)
         if resp.status_code not in (200, 201):
           raise RuntimeError(f"GitLab commit error {resp.status_code}: {resp.text}")
         return resp.json()
@@ -1285,24 +1474,14 @@ def setup(app):
         if not is_url_pingable(FROGPILOT_API):
           return
 
-        api_token, build_metadata, device_type, dongle_id = get_frogpilot_api_info()
-
-        payload = {
-          "api_token": api_token,
-          "asset_types": asset_types,
-          "build_metadata": build_metadata,
-          "device": device_type,
-          "frogpilot_dongle_id": dongle_id,
-          "theme_name": theme_name,
-          "username": username,
-        }
+        payload = _frogpilot_api_payload(asset_types=asset_types, theme_name=theme_name, username=username)
 
         try:
           resp = requests.post(f"{FROGPILOT_API}/discord/theme", json=payload, headers={"Content-Type": "application/json", "User-Agent": "frogpilot-api/1.0"}, timeout=30)
           resp.raise_for_status()
-          print("Successfully sent theme submission notification!")
-        except requests.exceptions.RequestException as exception:
-          print(f"Error sending theme notification: {exception}")
+          cloudlog.info("the_pond: sent theme submission notification")
+        except requests.exceptions.RequestException:
+          cloudlog.exception("the_pond: failed to send theme notification")
 
       asset_types = []
       submission_urls = {}
@@ -1310,22 +1489,11 @@ def setup(app):
       distance_icons_path = theme_path / "distance_icons"
       if distance_icons_path.exists() and any(distance_icons_path.iterdir()):
         zip_path = shutil.make_archive(str(distance_icons_path), "zip", distance_icons_path)
-        encoded = encode_file_base64(zip_path)
-        file_name = f"{combined_name}.zip"
-        actions = [
-          {
-            "action": "create",
-            "file_path": file_name,
-            "content": encoded,
-            "encoding": "base64"
-          }
-        ]
-        commit_payload = {
+        gitlab_post({
           "branch": "Distance-Icons",
           "commit_message": f"Added Distance Icons: {combined_name}",
-          "actions": actions
-        }
-        gitlab_post(commit_payload)
+          "actions": [_gitlab_action(f"{combined_name}.zip", encode_file_base64(zip_path))],
+        })
         asset_types.append("Distance Icons")
         submission_urls["distance_icons"] = f"https://gitlab.com/{RESOURCES_REPO}-Submissions/-/tree/Distance-Icons"
 
@@ -1334,45 +1502,27 @@ def setup(app):
         folder_path = theme_path / folder
         if folder_path.exists() and any(folder_path.iterdir()):
           zip_path = shutil.make_archive(str(folder_path), "zip", folder_path)
-          encoded = encode_file_base64(zip_path)
-          file_path = f"{combined_name}/{folder}.zip"
-          theme_actions.append({
-            "action": "create",
-            "file_path": file_path,
-            "content": encoded,
-            "encoding": "base64"
-          })
+          theme_actions.append(_gitlab_action(f"{combined_name}/{folder}.zip", encode_file_base64(zip_path)))
 
       if theme_actions:
-        commit_payload = {
+        gitlab_post({
           "branch": "Themes",
           "commit_message": f"Added Theme: {combined_name}",
-          "actions": theme_actions
-        }
-        gitlab_post(commit_payload)
+          "actions": theme_actions,
+        })
         asset_types.append("Theme")
         submission_urls["theme"] = f"https://gitlab.com/{RESOURCES_REPO}-Submissions/-/tree/Themes"
 
       wheel_file = request.files.get("steeringWheel")
       if wheel_file and wheel_file.filename:
         suffix = Path(wheel_file.filename).suffix
-        file_name = f"{combined_name}{suffix}"
         wheel_file.seek(0)
         encoded_wheel = base64.b64encode(wheel_file.read()).decode("utf-8")
-        actions = [
-          {
-            "action": "create",
-            "file_path": file_name,
-            "content": encoded_wheel,
-            "encoding": "base64"
-          }
-        ]
-        commit_payload = {
+        gitlab_post({
           "branch": "Steering-Wheels",
           "commit_message": f"Added Steering Wheel: {combined_name}",
-          "actions": actions
-        }
-        gitlab_post(commit_payload)
+          "actions": [_gitlab_action(f"{combined_name}{suffix}", encoded_wheel)],
+        })
         asset_types.append("Steering Wheel")
         submission_urls["steering_wheel"] = f"https://gitlab.com/{RESOURCES_REPO}-Submissions/-/tree/Steering-Wheels"
 
@@ -1386,11 +1536,12 @@ def setup(app):
         "branches": submission_urls
       }), 200
 
-    except Exception as exception:
-      return jsonify({"error": str(exception)}), 500
+    except Exception:
+      cloudlog.exception("the_pond submit_theme failed")
+      return jsonify({"error": "Theme submission failed. Please try again later."}), 500
 
     finally:
-      if "theme_path" in locals() and theme_path.parent.exists():
+      if "theme_path" in locals() and theme_path is not None and theme_path.parent.exists():
         delete_file(theme_path.parent)
 
   @app.route("/api/tmux_log/capture", methods=["POST"])
@@ -1401,17 +1552,23 @@ def setup(app):
     log_filename = f"tmux_log_{timestamp}.json"
     log_path = TMUX_LOGS_PATH / log_filename
 
-    run_cmd(["tmux", "capture-pane", "-J", "-S", "-"], "Captured tmux pane.", "Failed to capture tmux pane.")
+    _run_cmd(["tmux", "capture-pane", "-J", "-S", "-"], "Captured tmux pane.", "Failed to capture tmux pane.")
 
-    result = subprocess.run(["tmux", "show-buffer"], capture_output=True, text=True, check=True)
+    try:
+      result = subprocess.run(["tmux", "show-buffer"], capture_output=True, text=True, check=True, timeout=10)
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+      return jsonify({"error": "No tmux buffer to capture (is a tmux session running?)"}), 409
     log_path.write_text(result.stdout, encoding="utf-8")
 
-    run_cmd(["tmux", "delete-buffer"], "Deleted tmux buffer.", "Failed to delete tmux buffer.")
+    _run_cmd(["tmux", "delete-buffer"], "Deleted tmux buffer.", "Failed to delete tmux buffer.")
     return jsonify({"message": "Captured console log successfully!", "log_file": log_filename}), 200
 
   @app.route("/api/tmux_log/delete/<filename>", methods=["DELETE"])
   def delete_tmux_log(filename):
-    file_path = TMUX_LOGS_PATH / filename
+    safe = secure_filename(filename)
+    file_path = TMUX_LOGS_PATH / safe
+    if not safe or not helpers.is_within(TMUX_LOGS_PATH, file_path):
+      return jsonify({"error": "Forbidden"}), 403
     if file_path.exists():
       delete_file(file_path)
       return jsonify({"message": f"{filename} deleted!"}), 200
@@ -1439,25 +1596,35 @@ def setup(app):
 
   @app.route("/api/tmux_log/live", methods=["GET"])
   def stream_tmux_log():
-    if subprocess.run(["tmux", "has-session", "-t", "comma"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
-      run_cmd(["tmux", "new-session", "-d", "-s", "comma", "-x", "240", "-y", "70", "bash"], "Started tmux session", "Failed to start tmux session")
-    else:
-      run_cmd(["tmux", "resize-window", "-t", "comma:0", "-x", "240", "-y", "70"], "Resized tmux window", "Failed to resize tmux window")
-
     def generate():
-      while True:
-        output = subprocess.check_output(["tmux", "capture-pane", "-t", "comma:0", "-p", "-S", "-1000"], text=True)
-
-        yield "data: " + "\n".join(reversed(output.splitlines())).replace("\n", "\ndata: ") + "\n\n"
-
-        time.sleep(0.1)
-    return Response(generate(), mimetype="text/event-stream")
+      deadline = time.monotonic() + _TMUX_STREAM_MAX_SECONDS
+      try:
+        while time.monotonic() < deadline:
+          try:
+            output = subprocess.check_output(["tmux", "capture-pane", "-p", "-S", "-1000"], text=True, timeout=5)
+          except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            yield "data: No active tmux session to stream.\n\n"
+            time.sleep(1)
+            continue
+          except FileNotFoundError:
+            yield "data: tmux is not available on this device.\n\n"
+            break
+          yield "data: " + "\n".join(reversed(output.splitlines())).replace("\n", "\ndata: ") + "\n\n"
+          time.sleep(0.1)
+      except GeneratorExit:
+        return
+    return Response(stream_with_context(generate()), mimetype="text/event-stream")
 
   @app.route("/api/tmux_log/rename/<old>/<new>", methods=["PUT"])
   def rename_tmux_log_path_params(old, new):
-    old_path = TMUX_LOGS_PATH / old
+    old_safe = secure_filename(old)
     new_safe = secure_filename(new)
+    if not old_safe or not new_safe:
+      return jsonify({"error": "Invalid name"}), 400
+    old_path = TMUX_LOGS_PATH / old_safe
     new_path = TMUX_LOGS_PATH / new_safe
+    if not helpers.is_within(TMUX_LOGS_PATH, old_path) or not helpers.is_within(TMUX_LOGS_PATH, new_path):
+      return jsonify({"error": "Forbidden"}), 403
 
     if not old_path.exists():
       return jsonify({"error": "Original file not found"}), 404
@@ -1471,42 +1638,53 @@ def setup(app):
 
   @app.route("/api/tsk_available", methods=["GET"])
   def tsk_available():
-    with car.CarParams.from_bytes(params.get("CarParamsPersistent")) as cp_reader:
-      CP = cp_reader.as_builder()
-
-    return jsonify({"result": CP.secOcRequired})
+    cp = _car_params()
+    if cp is None:
+      return jsonify({"result": False})
+    return jsonify({"result": cp.secOcRequired})
 
   @app.route("/api/tsk_keys", methods=["DELETE"])
   def delete_secoc_key():
     name = request.args.get("name")
-    keys = json.loads(params.get("SecOCKeys") or "[]")
-    keys = [key for key in keys if key.get("name") != name]
-    params.put("SecOCKeys", json.dumps(keys))
+    if not name:
+      return jsonify({"error": "Missing key name"}), 400
+    with _PARAMS_LOCK:
+      keys = json.loads(params.get("SecOCKeys") or "[]")
+      keys = [key for key in keys if key.get("name") != name]
+      params.put("SecOCKeys", json.dumps(keys))
     return jsonify(keys)
 
   @app.route("/api/tsk_keys", methods=["GET"])
   def get_secoc_keys():
-    return jsonify(json.loads(params.get("SecOCKeys", "[]")))
+    return jsonify(json.loads(params.get("SecOCKeys") or "[]"))
 
   @app.route("/api/tsk_keys", methods=["POST"])
   def save_secoc_keys():
     keys = request.get_json() or []
+    if not isinstance(keys, list) or not all(
+        isinstance(k, dict)
+        and helpers.is_valid_secoc_key(k.get("value"))
+        and helpers.is_safe_display_name(k.get("name"))
+        for k in keys
+    ):
+      return jsonify({"error": "Each key needs a safe name and a 32-hexadecimal-character value"}), 400
     params.put("SecOCKeys", json.dumps(keys))
 
     return jsonify(keys)
 
   @app.route("/api/tsk_key_set", methods=["POST"])
   def set_secoc_key():
-    data = request.get_json()
-    if not data or "value" not in data:
-      return jsonify({"error": "Missing key value"}), 400
+    data = request.get_json(silent=True) or {}
+    value = data.get("value")
+    if not helpers.is_valid_secoc_key(value):
+      return jsonify({"error": "Key must be 32 hexadecimal characters"}), 400
 
-    value = data["value"]
-    if not isinstance(value, str):
-      return jsonify({"error": "Key value must be a string"}), 400
+    cp = _car_params()
+    if cp is None or not cp.secOcRequired:
+      return jsonify({"error": "SecOC keys are not applicable to this vehicle"}), 409
 
+    cloudlog.warning("the_pond audit: SecOC key applied")
     params.put("SecOCKey", value)
-
     return "", 204
 
   @app.route("/api/toggles/backup", methods=["POST"])
@@ -1524,8 +1702,7 @@ def setup(app):
 
       toggle_values[key] = value
 
-    encoded = utilities.encode_parameters(toggle_values)
-    wrapped = json.dumps({"data": encoded}, indent=2)
+    wrapped = json.dumps({"data": toggle_values}, indent=2)
 
     buffer = BytesIO(wrapped.encode("utf-8"))
     buffer.seek(0)
@@ -1540,36 +1717,55 @@ def setup(app):
 
     allowed_keys = {key for key, _, _, _ in frogpilot_default_params if key not in EXCLUDED_KEYS}
 
-    toggle_values = utilities.decode_parameters(request_data["data"])
-    for key, value in toggle_values.items():
-      if key in allowed_keys:
-        params.put(key, value)
+    raw = request_data["data"]
+    if isinstance(raw, dict):
+      toggle_values = raw
+    else:
+      try:
+        toggle_values = utilities.decode_parameters(raw)
+      except Exception:
+        return jsonify({"success": False, "message": "Invalid backup data."}), 400
+
+    with _PARAMS_LOCK:
+      for key, value in toggle_values.items():
+        if key in allowed_keys:
+          params.put(key, value)
 
     update_frogpilot_toggles()
     return jsonify({"success": True, "message": "Toggles restored!"})
 
   @app.route("/api/toggles/reset_default", methods=["POST"])
   def reset_toggle_values():
+    cloudlog.warning("the_pond audit: toggle reset (default) + reboot requested")
     params.put_bool("DoToggleReset", True)
-    HARDWARE.reboot()
+    threading.Timer(0.5, HARDWARE.reboot).start()
+    return {"message": "Resetting toggles and rebooting..."}, 200
 
   @app.route("/api/toggles/reset_stock", methods=["POST"])
   def reset_toggle_values_to_stock():
+    cloudlog.warning("the_pond audit: toggle reset (stock) + reboot requested")
     params.put_bool("DoToggleResetStock", True)
-    HARDWARE.reboot()
+    threading.Timer(0.5, HARDWARE.reboot).start()
+    return {"message": "Resetting toggles to stock and rebooting..."}, 200
 
   @app.route("/mapbox-help/<path:filename>", methods=["GET"])
   def serve_mapbox_help(filename):
-    return send_from_directory("/data/openpilot/frogpilot/navigation/navigation_training", filename)
-
-  @app.route("/playground", methods=["GET"])
-  def playground():
-    return render_template("playground.html")
+    return send_from_directory(NAVIGATION_TRAINING_PATH, filename)
 
   @app.route("/thumbnails/<path:file_path>", methods=["GET"])
   def get_thumbnail(file_path):
     for footage_path in FOOTAGE_PATHS:
-      if os.path.exists(os.path.join(footage_path, file_path)):
+      abs_path = os.path.join(footage_path, file_path)
+      if not helpers.is_within(footage_path, abs_path):
+        continue
+      if not os.path.exists(abs_path) and abs_path.endswith(("preview.png", "preview.gif")):
+        qcamera = os.path.join(os.path.dirname(abs_path), "qcamera.ts")
+        if os.path.exists(qcamera):
+          if abs_path.endswith("preview.png"):
+            utilities.video_to_png(qcamera, abs_path)
+          else:
+            utilities.video_to_gif(qcamera, abs_path)
+      if os.path.exists(abs_path):
         return send_from_directory(footage_path, file_path, as_attachment=True)
     return {"error": "Thumbnail not found"}, 404
 
@@ -1578,76 +1774,102 @@ def setup(app):
     camera = request.args.get("camera")
     filename = {"driver": "dcamera.hevc", "wide": "ecamera.hevc"}.get(camera, "fcamera.hevc")
     for footage_path in FOOTAGE_PATHS:
-      filepath = f"{footage_path}{path}/{filename}"
+      filepath = os.path.join(footage_path, path, filename)
+      if not helpers.is_within(footage_path, filepath):
+        continue
       if os.path.exists(filepath):
-        file_handle = utilities.ffmpeg_mp4_wrap_process_builder(filepath)
-
-        file_handle.seek(0, 2)
-        file_size = file_handle.tell()
-        file_handle.seek(0)
-
-        range_header = request.headers.get('Range', None)
-        if range_header:
-          byte_start = 0
-          byte_end = file_size - 1
-
-          if range_header.startswith('bytes='):
-            range_spec = range_header[6:]
-            if '-' in range_spec:
-              start, end = range_spec.split('-', 1)
-              if start:
-                byte_start = max(0, int(start))
-              if end:
-                byte_end = min(file_size - 1, int(end))
-
-          if byte_start >= file_size:
-            file_handle.close()
-            return Response("Requested Range Not Satisfiable", 416)
-
-          byte_end = max(byte_start, byte_end)
-
-          file_handle.seek(byte_start)
-          read_length = byte_end - byte_start + 1
-          data = file_handle.read(read_length)
-
-          response = Response(
-            data,
-            206,
-            headers={
-              'Content-Range': f'bytes {byte_start}-{byte_end}/{file_size}',
-              'Accept-Ranges': 'bytes',
-              'Content-Length': str(len(data)),
-              'Content-Type': 'video/mp4'
-            }
-          )
-        else:
-          data = file_handle.read()
-          response = Response(
-            data,
-            200,
-            headers={
-              'Accept-Ranges': 'bytes',
-              'Content-Length': str(file_size),
-              'Content-Type': 'video/mp4'
-            }
-          )
-
-        file_handle.close()
-        return response
+        mp4_path = utilities.ffmpeg_mp4_wrap_process_builder(filepath)
+        return send_file(mp4_path, mimetype="video/mp4", conditional=True)
     return {"error": "Video not found"}, 404
 
-def main():
+MDNS_GROUP = "224.0.0.251"
+MDNS_PORT = 5353
+
+def _local_ip_for(dest_ip):
+  sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+  try:
+    sock.connect((dest_ip, MDNS_PORT))
+    return sock.getsockname()[0]
+  except OSError:
+    return None
+  finally:
+    sock.close()
+
+def _mdns_responder():
+  try:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("", MDNS_PORT))
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+                    struct.pack("=4sl", socket.inet_aton(MDNS_GROUP), socket.INADDR_ANY))
+  except OSError:
+    cloudlog.exception("the_pond mdns: setup failed")
+    return
+  while True:
+    try:
+      data, addr = sock.recvfrom(2048)
+      if helpers.is_mdns_query_for(data) and (ip := _local_ip_for(addr[0])):
+        sock.sendto(helpers.build_mdns_a_response(ip), addr)
+    except OSError:
+      cloudlog.exception("the_pond mdns: loop error")
+
+def _iptables_redirect(op, port):
+  return ["sudo", "iptables", "-t", "nat", op, "PREROUTING",
+          "-p", "tcp", "--dport", "80", "-j", "REDIRECT", "--to-ports", str(port)]
+
+def _redirect_present(port):
+  try:
+    return subprocess.run(_iptables_redirect("-C", port), capture_output=True, timeout=_CMD_TIMEOUT).returncode == 0
+  except (OSError, subprocess.SubprocessError):
+    return False
+
+def _ensure_port80_redirect(port):
+  if _redirect_present(port):
+    return
+  cloudlog.warning(f"the_pond audit: redirecting port 80 -> {port}")
+  try:
+    subprocess.run(_iptables_redirect("-A", port), capture_output=True, timeout=_CMD_TIMEOUT, check=False)
+  except (OSError, subprocess.SubprocessError):
+    cloudlog.exception("the_pond: port 80 redirect failed")
+
+def _mdns_reachable():
+  query = struct.pack(">HHHHHH", 0, 0, 1, 0, 0, 0) + helpers.encode_dns_name(helpers.MDNS_HOSTNAME) + struct.pack(">HH", 1, 1)
+  sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+  sock.settimeout(2)
+  try:
+    sock.sendto(query, (MDNS_GROUP, MDNS_PORT))
+    return any(helpers.is_mdns_response_for(sock.recvfrom(2048)[0]) for _ in range(5))
+  except OSError:
+    return False
+  finally:
+    sock.close()
+
+def _self_check(port):
+  time.sleep(2)
+  for label, ok in (("mDNS responder", _mdns_reachable()), (f"port 80 -> {port} redirect", _redirect_present(port))):
+    (cloudlog.warning if ok else cloudlog.error)(f"the_pond self-check: {label} {'OK' if ok else 'FAILED'}")
+
+def create_app():
   app = Flask(__name__, static_folder="assets", static_url_path="/assets")
-  setup(app)
-
-  debug = PC or __package__ == "the_pond"
-  port = 8083 if debug else 8082
-
-  if debug:
-    print("\"The Pond\" is not running on a comma device, enabling debug mode")
-
   app.secret_key = secrets.token_hex(32)
-  app.run(host="0.0.0.0", port=port, debug=debug)
+  app.config["MAX_CONTENT_LENGTH"] = 256 * 1024 * 1024
+  setup(app)
+  return app
+
+def main():
+  app = create_app()
+
+  port = 8083 if PC else 8082
+  if PC:
+    print("\"The Pond\" is not running on a comma device (PC mode, port 8083)")
+
+  if not PC:
+    threading.Thread(target=_gear_monitor, daemon=True, name="the_pond_gear").start()
+    threading.Thread(target=_mdns_responder, daemon=True, name="the_pond_mdns").start()
+    _ensure_port80_redirect(port)
+    threading.Thread(target=_self_check, args=(port,), daemon=True, name="the_pond_selfcheck").start()
+
+  app.run(host="0.0.0.0", port=port, threaded=True, debug=False)
 
 if __name__ == "__main__":
   main()

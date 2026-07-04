@@ -1,4 +1,4 @@
-import { html, reactive } from "https://esm.sh/@arrow-js/core"
+import { html, reactive } from "/assets/vendor/arrow.mjs"
 import { Modal } from "/assets/components/modal.js";
 
 export function NavKeys() {
@@ -23,6 +23,7 @@ export function NavKeys() {
 
     showDeleteModal: false,
     keyToDelete: null,
+    busy: false,
   })
 
   const bumpImageVersion = () => state.imageVersion++
@@ -41,8 +42,8 @@ export function NavKeys() {
 
     state.visible = true
 
-    clearTimer = setTimeout(() => { state.message = "", state.error = "" }, 5000)
     fadeTimer = setTimeout(() => state.visible = false, 5000)
+    clearTimer = setTimeout(() => { state.message = "", state.error = "" }, 5500)
   }
 
   const util = {
@@ -58,8 +59,12 @@ export function NavKeys() {
     },
 
     req: async (url, opts) => {
-      const response = await fetch(url, opts)
-      return { ok: response.ok, data: await response.json().catch(() => ({})) }
+      try {
+        const response = await fetch(url, opts)
+        return { ok: response.ok, data: await response.json().catch(() => ({})) }
+      } catch {
+        return { ok: false, data: {} }
+      }
     }
   }
 
@@ -106,15 +111,15 @@ export function NavKeys() {
         return showMessage("error", "Failed to load keys...", "")
       }
 
-      state.amap1Key = data.amap1Key ?? ""
-      state.amap2Key = data.amap2Key ?? ""
-      state.savedA1 = !!state.amap1Key
-      state.savedA2 = !!state.amap2Key
+      state.amap1Key = ""
+      state.amap2Key = ""
+      state.savedA1 = !!data.amap1KeySet
+      state.savedA2 = !!data.amap2KeySet
 
       state.publicKey = data.mapboxPublic ?? ""
-      state.secretKey = data.mapboxSecret ?? ""
+      state.secretKey = ""
       state.savedPublic = !!state.publicKey
-      state.savedSecret = !!state.secretKey
+      state.savedSecret = !!data.mapboxSecretSet
 
       state.initialMapboxComplete = state.savedPublic && state.savedSecret
 
@@ -122,46 +127,52 @@ export function NavKeys() {
     },
 
     save: (kind) => async () => {
+      if (state.busy) return
       const group = kind.startsWith("amap") ? "amap" : "mapbox"
       const keyMeta = meta[kind]
       const value = util.prefix(state[keyMeta.prop].trim(), keyMeta.prefix)
 
-      const { ok, data } = await util.req(api.path.key, {
-        body: JSON.stringify({ [keyMeta.body]: value }),
-        headers: { "Content-Type": "application/json" },
-        method: "POST"
-      })
+      state.busy = true
+      try {
+        const { ok, data } = await util.req(api.path.key, {
+          body: JSON.stringify({ [keyMeta.body]: value }),
+          headers: { "Content-Type": "application/json" },
+          method: "POST"
+        })
 
-      if (!ok) {
+        if (!ok) {
+          const input = document.getElementById(`${kind}-key`)
+          if (input) {
+            input.value = ""
+            state[keyMeta.edit] = true
+            state[keyMeta.saved] = false
+            state[keyMeta.prop] = ""
+            input.focus()
+          }
+          return showMessage("error", data.error || "Save failed...", group)
+        }
+
+        Object.assign(state, {
+          [keyMeta.edit]: false,
+          [keyMeta.saved]: true,
+          [keyMeta.prop]: value
+        })
+
         const input = document.getElementById(`${kind}-key`)
         if (input) {
+          input.blur()
           input.value = ""
-          state[keyMeta.edit] = true
-          state[keyMeta.saved] = false
-          state[keyMeta.prop] = ""
-          input.focus()
+          requestAnimationFrame(() => { input.value = util.mask(state[keyMeta.prop]) })
         }
-        return showMessage("error", data.error || "Save failed...", group)
+
+        if (group === "mapbox") {
+          bumpImageVersion()
+        }
+
+        showMessage("message", data.message || "Saved!", group)
+      } finally {
+        state.busy = false
       }
-
-      Object.assign(state, {
-        [keyMeta.edit]: false,
-        [keyMeta.saved]: true,
-        [keyMeta.prop]: value
-      })
-
-      const input = document.getElementById(`${kind}-key`)
-      if (input) {
-        input.blur()
-        input.value = ""
-        requestAnimationFrame(() => { input.value = util.mask(state[keyMeta.prop]) })
-      }
-
-      if (group === "mapbox") {
-        bumpImageVersion()
-      }
-
-      showMessage("message", data.message || "Saved!", group)
     },
 
     confirmDelete: (kind) => {
@@ -172,31 +183,36 @@ export function NavKeys() {
     delete: async () => {
       const kind = state.keyToDelete;
       if (!kind) return;
+      if (state.busy) return;
 
       const group = kind.startsWith("amap") ? "amap" : "mapbox"
       const keyMeta = meta[kind]
 
-      const { ok, data } = await util.req(`${api.path.key}?type=${kind}`, {
-        method: "DELETE"
-      })
-
       state.showDeleteModal = false;
+      state.busy = true;
+      try {
+        const { ok, data } = await util.req(`${api.path.key}?type=${kind}`, {
+          method: "DELETE"
+        })
 
-      if (!ok) {
-        return showMessage("error", data.error || "Delete failed...", group)
+        if (!ok) {
+          return showMessage("error", data.error || "Delete failed...", group)
+        }
+
+        Object.assign(state, {
+          [keyMeta.saved]: false,
+          [keyMeta.prop]: ""
+        })
+
+        if (group === "mapbox") {
+          state.initialMapboxComplete = false
+          bumpImageVersion()
+        }
+
+        showMessage("message", data.message || "Deleted!", group)
+      } finally {
+        state.busy = false;
       }
-
-      Object.assign(state, {
-        [keyMeta.saved]: false,
-        [keyMeta.prop]: ""
-      })
-
-      if (group === "mapbox") {
-        state.initialMapboxComplete = false
-        bumpImageVersion()
-      }
-
-      showMessage("message", data.message || "Deleted!", group)
     }
   }
 
@@ -210,9 +226,9 @@ export function NavKeys() {
         <div class="navkeys-title">
           ${title}
           ${isMapbox ? html`
-            <span class="navkeys-help-icon" @click="${() => state.showMapboxHelp = !state.showMapboxHelp}">
+            <button type="button" class="navkeys-help-icon" aria-label="Toggle Mapbox key setup help" @click="${() => state.showMapboxHelp = !state.showMapboxHelp}">
               <i class="bi bi-question-circle-fill"></i>
-            </span>
+            </button>
           ` : ""}
         </div>
 
@@ -228,8 +244,10 @@ export function NavKeys() {
                 class="navkeys-input"
                 id="${kind}-key"
                 placeholder="${keyMeta.prefix || ""}xxxxxx..."
-                value="${() => state[keyMeta.saved] ? util.mask(state[keyMeta.prop]) : state[keyMeta.prop]}"
+                value="${() => state[keyMeta.saved] ? util.mask(state[keyMeta.prop]) : ""}"
                 @keydown="${(e) => {
+                  if (e.ctrlKey || e.altKey || e.metaKey) return
+                  if (e.key.length !== 1 && e.key !== "Backspace" && e.key !== "Delete") return
                   if (state[keyMeta.saved] && !state[keyMeta.edit]) {
                     state[keyMeta.edit] = true
                     state[keyMeta.saved] = false
@@ -241,8 +259,9 @@ export function NavKeys() {
               />
               <button
                 class="${() => `navkeys-btn ${state[keyMeta.saved] ? "delete" : ""}`}"
+                aria-label="${() => state[keyMeta.saved] ? `Delete ${label} Key` : `Save ${label} Key`}"
                 @click="${() => state[keyMeta.saved] ? api.confirmDelete(kind) : api.save(kind)()}"
-                disabled="${() => !state[keyMeta.saved] && !canSave(kind)}">
+                disabled="${() => state.busy || (!state[keyMeta.saved] && !canSave(kind))}">
                 ${() => state[keyMeta.saved] ? "🗑️" : "💾"}
               </button>
             </div>
@@ -254,6 +273,8 @@ export function NavKeys() {
             return html`
               <div class="navkeys-help-img">
                 <img
+                  @error="${e => { e.target.style.display = 'none' }}"
+                  @load="${e => { e.target.style.display = '' }}"
                   alt="Mapbox key setup guide"
                   src="${() => {
                     const bothKeysSet = state.savedPublic && state.savedSecret
@@ -281,11 +302,15 @@ export function NavKeys() {
       <div class="navkeys-status">
         <div
           class="navkeys-message"
+          role="status"
+          aria-live="polite"
           style="${() => state.lastGroup === group && state.message ? `opacity: ${state.visible ? 1 : 0}` : "opacity: 0"}">
           ${() => state.message}
         </div>
         <div
           class="navkeys-error"
+          role="alert"
+          aria-live="assertive"
           style="${() => state.lastGroup === group && state.error ? `opacity: ${state.visible ? 1 : 0}` : "opacity: 0"}">
           ${() => state.error}
         </div>
@@ -306,7 +331,7 @@ export function NavKeys() {
     </div>
     ${() => state.showDeleteModal ? Modal({
       title: "Confirm Delete",
-      message: `Are you sure you want to delete your <strong>${getDeleteLabel(state.keyToDelete)}</strong> key?`,
+      message: html`Are you sure you want to delete your <strong>${getDeleteLabel(state.keyToDelete)}</strong> key?`,
       onConfirm: api.delete,
       onCancel: () => { state.showDeleteModal = false },
       confirmText: "Yes, Delete"

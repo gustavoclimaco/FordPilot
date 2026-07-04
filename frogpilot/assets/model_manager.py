@@ -10,11 +10,11 @@ from pathlib import Path
 from urllib.parse import quote_plus
 
 from openpilot.common.basedir import BASEDIR
-from openpilot.frogpilot.assets.download_functions import GITLAB_URL, download_file, get_remote_file_size, get_repository_url, handle_error, handle_request_error, verify_download
-from openpilot.frogpilot.common.frogpilot_utilities import delete_file, extract_tar, load_json_file, update_json_file
+from openpilot.frogpilot.assets.download_functions import GITLAB_URL, download_file, get_repository_url, handle_error, handle_request_error, verify_download
+from openpilot.frogpilot.common.frogpilot_utilities import delete_file, load_json_file, update_json_file
 from openpilot.frogpilot.common.frogpilot_variables import (
-  DEFAULT_MODEL, DEFAULT_MODEL_NAME, DEFAULT_MODEL_VERSION, MODELS_PATH, RESOURCES_REPO, TINYGRAD_FILES,
-  params, params_default, params_memory, update_frogpilot_toggles
+  ALL_TINYGRAD_FILES, DEFAULT_MODEL, DEFAULT_MODEL_NAME, DEFAULT_MODEL_VERSION, MODELS_PATH, RESOURCES_REPO,
+  get_tinygrad_files, params, params_default, params_memory, update_frogpilot_toggles
 )
 
 VERSION = "v17"
@@ -24,13 +24,11 @@ CANCEL_DOWNLOAD_PARAM = "CancelModelDownload"
 DOWNLOAD_PROGRESS_PARAM = "ModelDownloadProgress"
 MODEL_DOWNLOAD_PARAM = "ModelToDownload"
 MODEL_DOWNLOAD_ALL_PARAM = "DownloadAllModels"
-UPDATE_TINYGRAD_PARAM = "UpdateTinygrad"
 
 DEFAULT_TINYGRAD_SIZE = 87746736
 TAR_FILE_NAME = f"Tinygrad_{VERSION}.tar.gz"
 
 TINYGRAD_MODELD_PATH = Path(BASEDIR) / "frogpilot/tinygrad_modeld"
-TINYGRAD_REPO_PATH = Path(BASEDIR) / "tinygrad_repo"
 
 class ModelManager:
   def __init__(self, boot_run=False):
@@ -56,8 +54,8 @@ class ModelManager:
 
   def check_models(self, boot_run, repo_url):
     downloaded_models = [
-      model for model in MODELS_PATH.iterdir()
-      if (MODELS_PATH / f"{model}.thneed").is_file() or all((MODELS_PATH / f"{model}_{filename}").is_file() for filename, _ in TINYGRAD_FILES)
+      model_file for model_file in MODELS_PATH.iterdir()
+      if model_file.suffix == ".thneed" or any(model_file.name.endswith(f"_{filename}") for filename, _ in ALL_TINYGRAD_FILES)
     ]
     for model_file in downloaded_models:
       if not any(model in model_file.name for model in set(self.available_models)):
@@ -97,15 +95,16 @@ class ModelManager:
       else:
         model_missing = False
         model_outdated = False
+        tinygrad_files = self.tinygrad_files_for_model(model)
 
-        for filename, _ in TINYGRAD_FILES:
+        for filename, _ in tinygrad_files:
           expected_file = MODELS_PATH / f"{model}_{filename}"
           if not expected_file.is_file():
             model_missing = True
             need_to_update_models = True
             break
 
-        for filename, _ in TINYGRAD_FILES:
+        for filename, _ in tinygrad_files:
           model_file = f"{model}_{filename}"
 
           expected_size = model_sizes.get(model_file)
@@ -118,21 +117,11 @@ class ModelManager:
 
         if model_missing or model_outdated:
           print(f"Model {model} is either missing required files or outdated. Deleting...")
-          for filename, _ in TINYGRAD_FILES:
+          for filename, _ in tinygrad_files:
             delete_file(MODELS_PATH / f"{model}_{filename}")
 
     if need_to_update_models:
       params_memory.put_bool(MODEL_DOWNLOAD_ALL_PARAM, True)
-
-  def check_tinygrad(self, repo_url):
-    tinygrad_url = f"{repo_url}/Tinygrad/{TAR_FILE_NAME}"
-
-    expected_size = get_remote_file_size(tinygrad_url, self.session)
-    local_size = int(self.tinygrad_sizes.get(TAR_FILE_NAME, 0))
-
-    if expected_size > 0 and local_size != expected_size:
-      print(f"Tinygrad version {VERSION} is outdated, expected_size: {expected_size}, local_size: {local_size}, flagging for update...")
-      params.put_bool("TinygradUpdateAvailable", True)
 
   def copy_default_model(self):
     classic_default_model_path = MODELS_PATH / "wd-40.thneed"
@@ -149,7 +138,7 @@ class ModelManager:
       print(f"Copied the default model from {source_path} to {default_model_path}")
       self.update_model_size(default_model_path)
 
-    for filename, description in TINYGRAD_FILES:
+    for filename, description in get_tinygrad_files(DEFAULT_MODEL_VERSION):
       source = TINYGRAD_MODELD_PATH / "models" / filename
       target = MODELS_PATH / f"{DEFAULT_MODEL}_{filename}"
       if source.is_file() and (not target.is_file() or source.stat().st_size != target.stat().st_size):
@@ -172,7 +161,7 @@ class ModelManager:
       if self.is_tinygrad_model(model):
         already_downloaded = (MODELS_PATH / f"{model}.thneed").is_file()
       else:
-        already_downloaded = all((MODELS_PATH / f"{model}_{filename}").is_file() for filename, _ in TINYGRAD_FILES)
+        already_downloaded = self.has_tinygrad_files(model)
 
       if already_downloaded:
         continue
@@ -241,7 +230,8 @@ class ModelManager:
         self.downloading_model = False
     else:
       all_model_sizes = self.fetch_all_model_sizes(repo_url) or {}
-      tinygrad_filenames = [f"{model_to_download}_{file_key}" for file_key, _ in TINYGRAD_FILES]
+      tinygrad_files = self.tinygrad_files_for_model(model_to_download)
+      tinygrad_filenames = [f"{model_to_download}_{file_key}" for file_key, _ in tinygrad_files]
 
       file_sizes = []
       file_sources = []
@@ -262,7 +252,7 @@ class ModelManager:
       known_file_sizes = [size for size in file_sizes if size > 0]
       total_model_bytes = sum(known_file_sizes) if len(known_file_sizes) == len(file_sizes) else 0
 
-      for (file_key, description), part_bytes, (primary_url, fallback_url) in zip(TINYGRAD_FILES, file_sizes, file_sources):
+      for (file_key, description), part_bytes, (primary_url, fallback_url) in zip(tinygrad_files, file_sizes, file_sources):
         filename = f"{model_to_download}_{file_key}"
         model_path = MODELS_PATH / filename
 
@@ -303,7 +293,7 @@ class ModelManager:
           return
 
       print(f"Updating model sizes for {model_to_download}...")
-      for filename, _ in TINYGRAD_FILES:
+      for filename, _ in tinygrad_files:
         file_path = MODELS_PATH / f"{model_to_download}_{filename}"
         self.update_model_size(file_path)
 
@@ -368,13 +358,25 @@ class ModelManager:
       if model_info:
         self.update_model_params(model_info)
         self.check_models(boot_run, repo_url)
-        self.check_tinygrad(repo_url)
     except Exception as exception:
       handle_request_error(exception, None, None, None)
       return []
 
   def is_tinygrad_model(self, model):
-    return self.model_versions[self.available_models.index(model)] in {"v1", "v2", "v3", "v4", "v5", "v6"}
+    return self.model_version(model) in {"v1", "v2", "v3", "v4", "v5", "v6"}
+
+  def model_version(self, model):
+    if model in self.available_models:
+      index = self.available_models.index(model)
+      if index < len(self.model_versions):
+        return self.model_versions[index]
+    return DEFAULT_MODEL_VERSION
+
+  def tinygrad_files_for_model(self, model):
+    return get_tinygrad_files(self.model_version(model))
+
+  def has_tinygrad_files(self, model):
+    return all((MODELS_PATH / f"{model}_{filename}").is_file() for filename, _ in self.tinygrad_files_for_model(model))
 
   def update_model_params(self, model_info):
     self.available_models = [model["id"] for model in model_info]
@@ -402,76 +404,11 @@ class ModelManager:
     update_json_file(self.model_sizes_path, self.model_sizes)
     print(f"Updated size for {file_path.name} in {self.model_sizes_path.name}")
 
-  def update_tinygrad_size(self, file_path):
-    self.tinygrad_sizes[TAR_FILE_NAME] = file_path.stat().st_size
-    update_json_file(self.tinygrad_sizes_path, self.tinygrad_sizes)
-    print(f"Updated size for {TAR_FILE_NAME} in {self.tinygrad_sizes_path.name}")
-
-  def update_tinygrad(self):
-    repo_url = get_repository_url(self.session)
-    if not repo_url:
-      handle_error(None, "GitHub and GitLab are offline...", "Repository unavailable", None, None)
-      return
-
-    primary_url = f"{repo_url}/Tinygrad/{TAR_FILE_NAME}"
-    fallback_url = f"https://gitlab.com/{RESOURCES_REPO}/-/raw/Tinygrad/{TAR_FILE_NAME}"
-
-    tinygrad_tar_path = Path("/data/tmp/tinygrad.tar.gz")
-    try:
-      print(f"Attempting to download tinygrad from {primary_url}...")
-      download_file(CANCEL_DOWNLOAD_PARAM, tinygrad_tar_path, DOWNLOAD_PROGRESS_PARAM, primary_url, UPDATE_TINYGRAD_PARAM, self.session)
-
-      if params_memory.get_bool(CANCEL_DOWNLOAD_PARAM):
-        delete_file(tinygrad_tar_path)
-
-        handle_error(None, "Tinygrad update cancelled...", "Tinygrad update cancelled...", UPDATE_TINYGRAD_PARAM, DOWNLOAD_PROGRESS_PARAM)
-        params_memory.remove("CancelModelDownload")
-        return
-
-      if not verify_download(tinygrad_tar_path, primary_url, self.session):
-        print(f"Verification failed for {primary_url}. Retrying from GitLab...")
-        download_file(CANCEL_DOWNLOAD_PARAM, tinygrad_tar_path, DOWNLOAD_PROGRESS_PARAM, fallback_url, UPDATE_TINYGRAD_PARAM, self.session)
-
-      if params_memory.get_bool(CANCEL_DOWNLOAD_PARAM):
-        delete_file(tinygrad_tar_path)
-
-        handle_error(None, "Tinygrad update cancelled...", "Tinygrad update cancelled...", UPDATE_TINYGRAD_PARAM, DOWNLOAD_PROGRESS_PARAM)
-        params_memory.remove("CancelModelDownload")
-        return
-
-      if not verify_download(tinygrad_tar_path, fallback_url, self.session):
-        handle_error(tinygrad_tar_path, "Verification Failed", "Tinygrad verification failed", UPDATE_TINYGRAD_PARAM, DOWNLOAD_PROGRESS_PARAM)
-        return
-
-      print("Tinygrad downloaded successfully! Proceeding with installation...")
-      self.update_tinygrad_size(tinygrad_tar_path)
-
-      params_memory.put(DOWNLOAD_PROGRESS_PARAM, "Installing...")
-
-      print("Deleting old tinygrad directories...")
-      delete_file(TINYGRAD_MODELD_PATH)
-      print(f"Removed {TINYGRAD_MODELD_PATH}")
-      delete_file(TINYGRAD_REPO_PATH)
-      print(f"Removed {TINYGRAD_REPO_PATH}")
-
-      extract_tar(tinygrad_tar_path, Path(BASEDIR))
-
-      print("Tinygrad update completed successfully!")
-
-      params.put_bool("TinygradUpdateAvailable", False)
-
-      params_memory.put(DOWNLOAD_PROGRESS_PARAM, "Updated!")
-      params_memory.remove(UPDATE_TINYGRAD_PARAM)
-
-      self.update_tinygrad_models(repo_url)
-    except Exception as exception:
-      handle_error(tinygrad_tar_path, "Update Failed", f"An unexpected error occurred: {exception}", UPDATE_TINYGRAD_PARAM, DOWNLOAD_PROGRESS_PARAM)
-
   def update_tinygrad_models(self, repo_url=None):
     print("Updating old Tinygrad models...")
 
     installed_tinygrad_models = set()
-    for filename, _ in TINYGRAD_FILES:
+    for filename, _ in ALL_TINYGRAD_FILES:
       suffix = f"_{filename}"
       for file_path in MODELS_PATH.glob(f"*{suffix}"):
         model_name = file_path.name.rsplit(suffix, 1)[0]
@@ -526,8 +463,6 @@ class ModelManager:
         self.tinygrad_sizes[TAR_FILE_NAME] = DEFAULT_TINYGRAD_SIZE
         update_json_file(self.tinygrad_sizes_path, self.tinygrad_sizes)
         print(f"Updated size for {TAR_FILE_NAME} in {self.tinygrad_sizes_path.name}")
-
-        params.remove("TinygradUpdateAvailable")
 
     VERSION_PATH.write_text(VERSION)
     print(f"Updated {VERSION_PATH} to {VERSION}")

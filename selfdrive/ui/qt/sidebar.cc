@@ -44,6 +44,8 @@ void Sidebar::updateTheme() {
   FrogPilotUIScene &frogpilot_scene = fs.frogpilot_scene;
   QJsonObject &frogpilot_toggles = fs.frogpilot_toggles;
 
+  update_theme(&fs);
+
   isCPU = frogpilot_toggles.value("cpu_metrics").toBool();
   isDeveloperUI = frogpilot_toggles.value("developer_ui").toBool();
   isFahrenheit = frogpilot_toggles.value("fahrenheit").toBool();

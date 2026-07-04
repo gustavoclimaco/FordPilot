@@ -3,7 +3,7 @@ import json
 Import('qt_env', 'arch', 'common', 'messaging', 'visionipc', 'transformations')
 
 base_libs = [common, messaging, visionipc, transformations,
-             'm', 'OpenCL', 'ssl', 'crypto', 'pthread', 'avcodec', 'avformat', 'avutil', 'yuv', 'OmxCore'] + qt_env["LIBS"]
+             'm', 'OpenCL', 'ssl', 'crypto', 'pthread', 'avcodec', 'avformat', 'avutil', 'yuv'] + qt_env["LIBS"]
 
 if arch == 'larch64':
   base_libs.append('EGL')
@@ -57,7 +57,9 @@ frogpilot_src = ["../../frogpilot/ui/frogpilot_ui.cc", "../../frogpilot/ui/qt/of
                  "../../frogpilot/ui/qt/onroad/frogpilot_buttons.cc", "../../frogpilot/ui/qt/onroad/frogpilot_onroad.cc",
                  "../../frogpilot/ui/qt/widgets/developer_sidebar.cc", "../../frogpilot/ui/qt/widgets/drive_stats.cc",
                  "../../frogpilot/ui/qt/widgets/drive_summary.cc", "../../frogpilot/ui/qt/widgets/model_reviewer.cc",
-                 "../../frogpilot/ui/qt/widgets/navigation_functions.cc", "../../frogpilot/ui/screenrecorder/omx_encoder.cc",
+                 "../../frogpilot/ui/qt/widgets/navigation_functions.cc",
+                 "../../frogpilot/ui/screenrecorder/screen_encoder.cc",
+                 "../../frogpilot/ui/screenrecorder/recorder_engine.cc",
                  "../../frogpilot/ui/screenrecorder/screenrecorder.cc"]
 
 qt_src += frogpilot_src
@@ -103,7 +105,6 @@ if GetOption('extras'):
   qt_env.Program('tests/test_translations', [asset_obj, 'tests/test_runner.cc', 'tests/test_translations.cc'] + qt_src, LIBS=qt_libs)
   qt_env.Program('tests/ui_snapshot', [asset_obj, "tests/ui_snapshot.cc"] + qt_src, LIBS=qt_libs)
 
-qt_env['CPPPATH'] += ["../../frogpilot/ui/screenrecorder/openmax/include/"]
 
 if GetOption('extras') and arch != "Darwin":
   # setup and factory resetter

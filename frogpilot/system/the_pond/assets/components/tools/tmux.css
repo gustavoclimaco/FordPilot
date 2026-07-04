@@ -1,7 +1,10 @@
 #fileList {
   background-color: var(--sidebar-bg);
   border-radius: var(--border-radius-lg);
+  box-sizing: border-box;
+  color: var(--text-color);
   margin-left: 0;
+  max-height: 80vh;
   max-width: var(--width-xxl);
   overflow-y: auto;
   padding: var(--padding-base);
@@ -35,6 +38,11 @@
 
 #fileList .fileEntry:hover {
   background-color: var(--sidebar-active-bg);
+}
+
+#fileList .fileEntry:focus-visible {
+  outline: 2px solid var(--thumb-color);
+  outline-offset: -2px;
 }
 
 #fileList .fileEntry p .label {
@@ -71,7 +79,6 @@
 
 .tmux-control-button:hover {
   box-shadow: var(--shadow-md);
-  color: var(--secondary-fg);
   transform: var(--hover-scale-sm);
 }
 
@@ -105,11 +112,6 @@
   padding: var(--padding-lg);
   transform-origin: top center;
   transition: box-shadow var(--transition-fast), transform var(--transition-fast);
-}
-
-.tmux-control-widget:hover {
-  box-shadow: var(--shadow-md);
-  transform: var(--hover-scale-sm);
 }
 
 .tmux-control-wrapper {
@@ -167,18 +169,21 @@
   font-size: var(--font-size-sm);
   font-weight: var(--font-weight-bold);
   margin: 0;
+  padding: var(--padding-sm) var(--padding-base);
 }
 
 .tmuxLog {
+  color: var(--text-color);
   flex: 1 1 auto;
   font-size: var(--font-size-sm);
   margin: 0;
+  overflow-wrap: anywhere;
   overflow-y: auto;
   white-space: pre-wrap;
   width: 100%;
 }
 
-@media only screen and (max-width: 768px) and (orientation: portrait) {
+@media only screen and (max-width: 768px) {
   .tmux-block {
     margin-left: -1rem;
     width: 100vw;

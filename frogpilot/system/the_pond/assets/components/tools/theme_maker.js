@@ -1,4 +1,4 @@
-import { html, reactive } from "https://esm.sh/@arrow-js/core";
+import { html, reactive } from "/assets/vendor/arrow.mjs";
 import { Modal } from "/assets/components/modal.js";
 
 const defaultColors = {
@@ -158,6 +158,28 @@ function handleDragEnd(e) {
   });
 }
 
+function moveSequential(index, dir) {
+  const to = index + dir;
+  if (to < 0 || to >= state.sequentialImages.length) return;
+  const imgs = [...state.sequentialImages];
+  const files = [...fileStore.sequentialFiles];
+  [imgs[index], imgs[to]] = [imgs[to], imgs[index]];
+  [files[index], files[to]] = [files[to], files[index]];
+  state.sequentialImages = imgs;
+  fileStore.sequentialFiles = files;
+}
+
+const seqUrlCache = new Map();
+function getSeqUrl(file) {
+  if (!file) return "";
+  if (!seqUrlCache.has(file)) seqUrlCache.set(file, URL.createObjectURL(file));
+  return seqUrlCache.get(file);
+}
+function revokeSeqUrls() {
+  seqUrlCache.forEach(url => URL.revokeObjectURL(url));
+  seqUrlCache.clear();
+}
+
 const clearAsset = (type, key, subkey = null) => {
   state.themeSubmitted = false;
   if (key === "turnSignal") {
@@ -186,7 +208,7 @@ const onClearClick = (e, type, key, subkey = null) => {
   e.preventDefault();
   e.stopPropagation();
   clearAsset(type, key, subkey);
-  const input = e.currentTarget.parentElement.querySelector('input[type="file"]');
+  const input = e.currentTarget.parentElement.querySelector("input[type=\"file\"]");
   if (input) input.value = "";
 };
 
@@ -256,6 +278,12 @@ const isThemeAssetEmpty = () => {
     fileStore.sequentialFiles.length > 0;
 
   if (hasNewFiles) return false;
+
+  const hasCustomColors = Object.keys(defaultColors).some(key => {
+    const c = state.colors[key], d = defaultColors[key];
+    return c && (c.red !== d.red || c.green !== d.green || c.blue !== d.blue || c.alpha !== d.alpha);
+  });
+  if (hasCustomColors) return false;
 
   const hasExistingFileNames =
     Object.values(state.imageFileNames).some(val => {
@@ -404,7 +432,6 @@ const fetchDownloadables = async () => {
   }
 };
 
-
 (async () => {
   try {
     const response = await fetch("/api/params?key=DiscordUsername");
@@ -439,8 +466,6 @@ export function ThemeMaker() {
       return an.localeCompare(bn, undefined, { sensitivity: "base", numeric: true });
     });
   };
-
-
 
   const hasDistanceIcons = () => Object.values(fileStore.images.distanceIcons).some(f => f) || Object.values(state.imageFileNames.distanceIcons).some(name => name);
   const hasIcons = () => ["homeButton", "settingsButton"].some(key => fileStore.images[key] || state.imageFileNames[key]);
@@ -686,8 +711,14 @@ export function ThemeMaker() {
   };
 
   const manageThemes = async () => {
-    const response = await fetch("/api/themes/list");
-    const data = await response.json();
+    let data;
+    try {
+      const response = await fetch("/api/themes/list");
+      data = await response.json();
+    } catch {
+      showSnackbar("Failed to load themes.", "error");
+      return;
+    }
     state.themes = (data.themes || []).map(t => ({
       ...t,
       localHasColors: !!t.hasColors,
@@ -803,7 +834,7 @@ export function ThemeMaker() {
         state.isLoadingAsset = false;
         return;
       }
-      showSnackbar(`Downloading ${tab.replace('_', ' ')} for the "${displayName}" theme...`);
+      showSnackbar(`Downloading ${tab.replace("_", " ")} for the "${displayName}" theme...`);
       const result = await pollDownloadProgress();
       if (!result.ok) {
         showSnackbar(`Download ${result.status}`, "error");
@@ -825,7 +856,7 @@ export function ThemeMaker() {
         const f = tabToLocalFlag[tab];
         if (f) theme[f] = true;
       }
-      showSnackbar(`Downloaded ${tab.replace('_', ' ')} for "${displayName}".`);
+      showSnackbar(`Downloaded ${tab.replace("_", " ")} for "${displayName}".`);
     } catch (e) {
       showSnackbar("Unexpected error during download.", "error");
     } finally {
@@ -837,11 +868,15 @@ export function ThemeMaker() {
     if (state.isLoadingAsset) return;
     state.isLoadingAsset = true;
 
-    clearAssetType(assetType);
-
     try {
       const response = await fetch(`/api/themes/load/${theme.path}?type=${theme.type}`);
+      if (!response.ok) {
+        showSnackbar("Failed to load theme asset.", "error");
+        return;
+      }
       const data = await response.json();
+
+      clearAssetType(assetType);
 
       const fetchAndStoreFile = async (assetPath, key, subkey = null, type = "image", assetGroup = "") => {
         if (!assetPath) return;
@@ -885,7 +920,7 @@ export function ThemeMaker() {
         }
       }
 
-      if (assetType === "steering_wheel" && theme.path) {
+      if (assetType === "steering_wheel" && data.images && data.images.steeringWheel) {
         const url = `/api/themes/asset/${theme.path}/${data.images.steeringWheel.path}?type=${theme.type}`;
         const fileResponse = await fetch(url);
         const blob = await fileResponse.blob();
@@ -988,17 +1023,22 @@ export function ThemeMaker() {
       ? ""
       : `&component=${state.activeTab === "turn_signals" ? "signals" : state.activeTab}`;
 
-    const response = await fetch(`/api/themes/delete/${theme.path}?type=${theme.type}${component}`, { method: "DELETE" });
-    const result = await response.json();
-    if (response.ok) {
-      showSnackbar(result.message, "success");
-      deleteThemeAndRestoreDownloadables(theme.name);
-      manageThemes();
-    } else {
-      showSnackbar(result.message, "error");
+    try {
+      const response = await fetch(`/api/themes/delete/${theme.path}?type=${theme.type}${component}`, { method: "DELETE" });
+      const result = await response.json();
+      if (response.ok) {
+        showSnackbar(result.message, "success");
+        deleteThemeAndRestoreDownloadables(theme.name);
+        manageThemes();
+      } else {
+        showSnackbar(result.message, "error");
+      }
+    } catch {
+      showSnackbar("Failed to delete theme.", "error");
+    } finally {
+      state.showDeleteConfirmModal = false;
+      state.themeToDelete = null;
     }
-    state.showDeleteConfirmModal = false;
-    state.themeToDelete = null;
   };
 
   return html`<div class="theme-maker-container">
@@ -1013,7 +1053,7 @@ export function ThemeMaker() {
                     ${COLOR_LABELS[key]}
                     <input type="color"
                       value="${() => {
-                        const c = state.colors[key];
+                        const c = state.colors[key] || defaultColors[key];
                         return `#${c.red.toString(16).padStart(2, "0")}${c.green.toString(16).padStart(2, "0")}${c.blue.toString(16).padStart(2, "0")}`;
                       }}"
                       @input="${e => handleColorChange(e, key)}" />
@@ -1031,10 +1071,10 @@ export function ThemeMaker() {
                       @change="${e => handleFileUpload(e, "image", "distanceIcons", key)}" />
                     <div class="file-upload-label">
                       <span class="file-upload-text">${key.charAt(0).toUpperCase() + key.slice(1)}</span>
-                      <span class="file-name-display">${() => state.imageFileNames.distanceIcons[key] || ''}</span>
+                      <span class="file-name-display">${() => state.imageFileNames.distanceIcons[key] || ""}</span>
                       <label for="file-upload-distance-${key}" class="file-upload-button">Choose File</label>
                       ${() => state.imageFileNames.distanceIcons[key] ? html`
-                        <button class="file-clear-button" title="Clear" @click="${e => onClearClick(e, "image", "distanceIcons", key)}">
+                        <button class="file-clear-button" title="Clear" aria-label="Clear ${key.charAt(0).toUpperCase() + key.slice(1)} distance icon" @click="${e => onClearClick(e, "image", "distanceIcons", key)}">
                           <i class="bi bi-trash-fill"></i>
                         </button>
                       ` : ""}
@@ -1056,10 +1096,10 @@ export function ThemeMaker() {
                       @change="${e => handleFileUpload(e, "image", key)}" />
                     <div class="file-upload-label">
                       <span class="file-upload-text">${ICON_LABELS[key]}</span>
-                      <span class="file-name-display">${() => state.imageFileNames[key] || ''}</span>
+                      <span class="file-name-display">${() => state.imageFileNames[key] || ""}</span>
                       <label for="file-upload-${key}" class="file-upload-button">Choose File</label>
                       ${() => state.imageFileNames[key] ? html`
-                        <button class="file-clear-button" title="Clear" @click="${e => onClearClick(e, "image", key)}">
+                        <button class="file-clear-button" title="Clear" aria-label="Clear ${ICON_LABELS[key]}" @click="${e => onClearClick(e, "image", key)}">
                           <i class="bi bi-trash-fill"></i>
                         </button>
                       ` : ""}
@@ -1082,10 +1122,10 @@ export function ThemeMaker() {
                       @change="${e => handleFileUpload(e, "audio", key)}" />
                     <div class="file-upload-label">
                       <span class="file-upload-text">${label}</span>
-                      <span class="file-name-display">${() => state.soundFileNames[key] || ''}</span>
+                      <span class="file-name-display">${() => state.soundFileNames[key] || ""}</span>
                       <label for="file-upload-${key}" class="file-upload-button">Choose File</label>
                       ${() => state.soundFileNames[key] ? html`
-                        <button class="file-clear-button" title="Clear" @click="${e => onClearClick(e, "audio", key)}">
+                        <button class="file-clear-button" title="Clear" aria-label="Clear ${label}" @click="${e => onClearClick(e, "audio", key)}">
                           <i class="bi bi-trash-fill"></i>
                         </button>
                       ` : ""}
@@ -1104,10 +1144,10 @@ export function ThemeMaker() {
                     @change="${e => handleFileUpload(e, "image", "steeringWheel")}" />
                   <div class="file-upload-label">
                     <span class="file-upload-text">Steering Wheel</span>
-                    <span class="file-name-display">${() => state.imageFileNames.steeringWheel || ''}</span>
+                    <span class="file-name-display">${() => state.imageFileNames.steeringWheel || ""}</span>
                     <label for="file-upload-steeringWheel" class="file-upload-button">Choose File</label>
                     ${() => state.imageFileNames.steeringWheel ? html`
-                      <button class="file-clear-button" title="Clear" @click="${e => onClearClick(e, "image", "steeringWheel")}">
+                      <button class="file-clear-button" title="Clear" aria-label="Clear Steering Wheel" @click="${e => onClearClick(e, "image", "steeringWheel")}">
                         <i class="bi bi-trash-fill"></i>
                       </button>
                     ` : ""}
@@ -1136,7 +1176,7 @@ export function ThemeMaker() {
                 <div class="turn-signal-style-section">
                   <label class="theme-name-label turn-signal-label">
                     Turn Signal Style
-                    <span class="help-icon" @click="${() => state.showTurnSignalHelp = !state.showTurnSignalHelp}">?</span>
+                    <button type="button" class="help-icon" aria-label="Turn signal style help" @click="${() => state.showTurnSignalHelp = !state.showTurnSignalHelp}">?</button>
                   </label>
                   <div class="signal-type-toggle">
                     <button class="${() => `toggle-button ${state.turnSignalStyle === "Static" ? "active" : ""}`}"
@@ -1163,10 +1203,10 @@ export function ThemeMaker() {
                     @change="${e => handleFileUpload(e, "image", "turnSignalBlindspot")}" />
                   <div class="file-upload-label">
                     <span class="file-upload-text">Blind Spot</span>
-                    <span class="file-name-display">${() => state.imageFileNames.turnSignalBlindspot || ''}</span>
+                    <span class="file-name-display">${() => state.imageFileNames.turnSignalBlindspot || ""}</span>
                     <label for="file-upload-turnSignalBlindspot" class="file-upload-button">Choose File</label>
                     ${() => state.imageFileNames.turnSignalBlindspot ? html`
-                      <button class="file-clear-button" title="Clear" @click="${e => onClearClick(e, "image", "turnSignalBlindspot")}">
+                      <button class="file-clear-button" title="Clear" aria-label="Clear Blind Spot turn signal" @click="${e => onClearClick(e, "image", "turnSignalBlindspot")}">
                         <i class="bi bi-trash-fill"></i>
                       </button>
                     ` : ""}
@@ -1174,7 +1214,7 @@ export function ThemeMaker() {
                 </div>
                 <div>
                   <input type="file" class="file-upload-input" id="file-upload-turnSignal" accept="image/*"
-                    :multiple="${() => state.turnSignalType === "Sequential"}"
+                    multiple="${() => state.turnSignalType === "Sequential"}"
                     @change="${e => handleFileUpload(e, "image", "turnSignal")}" />
                   <div class="file-upload-label">
                     <span class="file-upload-text">${() => state.turnSignalType === "Sequential" ? "Turn Signals" : "Turn Signal"}</span>
@@ -1182,14 +1222,14 @@ export function ThemeMaker() {
                       ${() => {
                         if (state.turnSignalType === "Sequential") {
                           if (state.imageFileNames.turnSignal) return state.imageFileNames.turnSignal;
-                          return state.sequentialImages.length > 0 ? `${state.sequentialImages.length} image(s) selected` : '';
+                          return state.sequentialImages.length > 0 ? `${state.sequentialImages.length} image(s) selected` : "";
                         }
-                        return state.imageFileNames.turnSignal || '';
+                        return state.imageFileNames.turnSignal || "";
                       }}
                     </span>
                     <label for="file-upload-turnSignal" class="file-upload-button">${() => state.turnSignalType === "Sequential" ? "Choose Files" : "Choose File"}</label>
                     ${() => (state.imageFileNames.turnSignal || state.sequentialImages.length > 0) ? html`
-                      <button class="file-clear-button" title="Clear" @click="${e => onClearClick(e, "image", "turnSignal")}">
+                      <button class="file-clear-button" title="Clear" aria-label="Clear Turn Signal" @click="${e => onClearClick(e, "image", "turnSignal")}">
                         <i class="bi bi-trash-fill"></i>
                       </button>
                     ` : ""}
@@ -1203,14 +1243,14 @@ export function ThemeMaker() {
           </section>
         </div>
         <div class="save-button-wrapper">
-          <button class="apply-button" @click="${confirmApply}" :disabled="${() => state.isApplying}">
+          <button class="apply-button" @click="${confirmApply}" disabled="${() => state.isApplying}">
             ${() => state.isApplying ? "Applying..." : "Apply Theme"}
           </button>
           <button class="manage-themes-button" @click="${manageThemes}">Manage Themes</button>
-          <button class="save-button" @click="${confirmSave}" :disabled="${() => state.isSaving}">
+          <button class="save-button" @click="${confirmSave}" disabled="${() => state.isSaving}">
             ${() => state.isSaving ? "Saving..." : "Save Theme"}
           </button>
-          <button class="submit-button" @click="${confirmSubmit}" :disabled="${() => state.isSubmitting}">
+          <button class="submit-button" @click="${confirmSubmit}" disabled="${() => state.isSubmitting}">
             ${() => state.isSubmitting ? "Submitting..." : "Submit Theme"}
           </button>
         </div>
@@ -1222,32 +1262,32 @@ export function ThemeMaker() {
           <div class="checklist-container">
             <p style="margin-bottom: 10px; text-align: left; font-weight: bold;">Select components to apply:</p>
             <label class="checklist-item">
-              <input type="checkbox" :checked="${() => state.saveChecklist.colors}" @click="${() => state.saveChecklist.colors = !state.saveChecklist.colors}">
+              <input type="checkbox" checked="${() => state.saveChecklist.colors}" @click="${() => state.saveChecklist.colors = !state.saveChecklist.colors}">
               <span class="label-text">Colors</span>
               <span class="custom-checkbox"></span>
             </label>
             ${() => hasDistanceIcons() && html`<label class="checklist-item">
-              <input type="checkbox" :checked="${() => state.saveChecklist.distance_icons}" @click="${() => state.saveChecklist.distance_icons = !state.saveChecklist.distance_icons}">
+              <input type="checkbox" checked="${() => state.saveChecklist.distance_icons}" @click="${() => state.saveChecklist.distance_icons = !state.saveChecklist.distance_icons}">
               <span class="label-text">Distance Icons</span>
               <span class="custom-checkbox"></span>
             </label>`}
             ${() => hasIcons() && html`<label class="checklist-item">
-              <input type="checkbox" :checked="${() => state.saveChecklist.icons}" @click="${() => state.saveChecklist.icons = !state.saveChecklist.icons}">
+              <input type="checkbox" checked="${() => state.saveChecklist.icons}" @click="${() => state.saveChecklist.icons = !state.saveChecklist.icons}">
               <span class="label-text">Icons</span>
               <span class="custom-checkbox"></span>
             </label>`}
             ${() => hasSounds() && html`<label class="checklist-item">
-              <input type="checkbox" :checked="${() => state.saveChecklist.sounds}" @click="${() => state.saveChecklist.sounds = !state.saveChecklist.sounds}">
+              <input type="checkbox" checked="${() => state.saveChecklist.sounds}" @click="${() => state.saveChecklist.sounds = !state.saveChecklist.sounds}">
               <span class="label-text">Sounds</span>
               <span class="custom-checkbox"></span>
             </label>`}
             ${() => hasSteeringWheel() && html`<label class="checklist-item">
-              <input type="checkbox" :checked="${() => state.saveChecklist.steering_wheel}" @click="${() => state.saveChecklist.steering_wheel = !state.saveChecklist.steering_wheel}">
+              <input type="checkbox" checked="${() => state.saveChecklist.steering_wheel}" @click="${() => state.saveChecklist.steering_wheel = !state.saveChecklist.steering_wheel}">
               <span class="label-text">Steering Wheel</span>
               <span class="custom-checkbox"></span>
             </label>`}
             ${() => hasTurnSignals() && html`<label class="checklist-item">
-              <input type="checkbox" :checked="${() => state.saveChecklist.turn_signals}" @click="${() => state.saveChecklist.turn_signals = !state.saveChecklist.turn_signals}">
+              <input type="checkbox" checked="${() => state.saveChecklist.turn_signals}" @click="${() => state.saveChecklist.turn_signals = !state.saveChecklist.turn_signals}">
               <span class="label-text">Turn Signals</span>
               <span class="custom-checkbox"></span>
             </label>`}
@@ -1270,32 +1310,32 @@ export function ThemeMaker() {
           <div class="checklist-container">
             <p style="margin-bottom: 10px; text-align: left; font-weight: bold;">Select components to save:</p>
             <label class="checklist-item">
-              <input type="checkbox" :checked="${() => state.saveChecklist.colors}" @click="${() => state.saveChecklist.colors = !state.saveChecklist.colors}">
+              <input type="checkbox" checked="${() => state.saveChecklist.colors}" @click="${() => state.saveChecklist.colors = !state.saveChecklist.colors}">
               <span class="label-text">Colors</span>
               <span class="custom-checkbox"></span>
             </label>
             ${() => hasDistanceIcons() && html`<label class="checklist-item">
-              <input type="checkbox" :checked="${() => state.saveChecklist.distance_icons}" @click="${() => state.saveChecklist.distance_icons = !state.saveChecklist.distance_icons}">
+              <input type="checkbox" checked="${() => state.saveChecklist.distance_icons}" @click="${() => state.saveChecklist.distance_icons = !state.saveChecklist.distance_icons}">
               <span class="label-text">Distance Icons</span>
               <span class="custom-checkbox"></span>
             </label>`}
             ${() => hasIcons() && html`<label class="checklist-item">
-              <input type="checkbox" :checked="${() => state.saveChecklist.icons}" @click="${() => state.saveChecklist.icons = !state.saveChecklist.icons}">
+              <input type="checkbox" checked="${() => state.saveChecklist.icons}" @click="${() => state.saveChecklist.icons = !state.saveChecklist.icons}">
               <span class="label-text">Icons</span>
               <span class="custom-checkbox"></span>
             </label>`}
             ${() => hasSounds() && html`<label class="checklist-item">
-              <input type="checkbox" :checked="${() => state.saveChecklist.sounds}" @click="${() => state.saveChecklist.sounds = !state.saveChecklist.sounds}">
+              <input type="checkbox" checked="${() => state.saveChecklist.sounds}" @click="${() => state.saveChecklist.sounds = !state.saveChecklist.sounds}">
               <span class="label-text">Sounds</span>
               <span class="custom-checkbox"></span>
             </label>`}
             ${() => hasSteeringWheel() && html`<label class="checklist-item">
-              <input type="checkbox" :checked="${() => state.saveChecklist.steering_wheel}" @click="${() => state.saveChecklist.steering_wheel = !state.saveChecklist.steering_wheel}">
+              <input type="checkbox" checked="${() => state.saveChecklist.steering_wheel}" @click="${() => state.saveChecklist.steering_wheel = !state.saveChecklist.steering_wheel}">
               <span class="label-text">Steering Wheel</span>
               <span class="custom-checkbox"></span>
             </label>`}
             ${() => hasTurnSignals() && html`<label class="checklist-item">
-              <input type="checkbox" :checked="${() => state.saveChecklist.turn_signals}" @click="${() => state.saveChecklist.turn_signals = !state.saveChecklist.turn_signals}">
+              <input type="checkbox" checked="${() => state.saveChecklist.turn_signals}" @click="${() => state.saveChecklist.turn_signals = !state.saveChecklist.turn_signals}">
               <span class="label-text">Turn Signals</span>
               <span class="custom-checkbox"></span>
             </label>`}
@@ -1321,27 +1361,32 @@ export function ThemeMaker() {
           <div class="checklist-container">
             <p style="margin-bottom: 10px; text-align: left; font-weight: bold;">Select components to submit:</p>
             <label class="checklist-item">
-              <input type="checkbox" :checked="${() => state.saveChecklist.colors}" @click="${() => state.saveChecklist.colors = !state.saveChecklist.colors}">
+              <input type="checkbox" checked="${() => state.saveChecklist.colors}" @click="${() => state.saveChecklist.colors = !state.saveChecklist.colors}">
               <span class="label-text">Colors</span>
               <span class="custom-checkbox"></span>
             </label>
             ${() => hasDistanceIcons() && html`<label class="checklist-item">
-              <input type="checkbox" :checked="${() => state.saveChecklist.distance_icons}" @click="${() => state.saveChecklist.distance_icons = !state.saveChecklist.distance_icons}">
+              <input type="checkbox" checked="${() => state.saveChecklist.distance_icons}" @click="${() => state.saveChecklist.distance_icons = !state.saveChecklist.distance_icons}">
               <span class="label-text">Distance Icons</span>
               <span class="custom-checkbox"></span>
             </label>`}
+            ${() => hasIcons() && html`<label class="checklist-item">
+              <input type="checkbox" checked="${() => state.saveChecklist.icons}" @click="${() => state.saveChecklist.icons = !state.saveChecklist.icons}">
+              <span class="label-text">Icons</span>
+              <span class="custom-checkbox"></span>
+            </label>`}
             ${() => hasSounds() && html`<label class="checklist-item">
-              <input type="checkbox" :checked="${() => state.saveChecklist.sounds}" @click="${() => state.saveChecklist.sounds = !state.saveChecklist.sounds}">
+              <input type="checkbox" checked="${() => state.saveChecklist.sounds}" @click="${() => state.saveChecklist.sounds = !state.saveChecklist.sounds}">
               <span class="label-text">Sounds</span>
               <span class="custom-checkbox"></span>
             </label>`}
             ${() => hasSteeringWheel() && html`<label class="checklist-item">
-              <input type="checkbox" :checked="${() => state.saveChecklist.steering_wheel}" @click="${() => state.saveChecklist.steering_wheel = !state.saveChecklist.steering_wheel}">
+              <input type="checkbox" checked="${() => state.saveChecklist.steering_wheel}" @click="${() => state.saveChecklist.steering_wheel = !state.saveChecklist.steering_wheel}">
               <span class="label-text">Steering Wheel</span>
               <span class="custom-checkbox"></span>
             </label>`}
             ${() => hasTurnSignals() && html`<label class="checklist-item">
-              <input type="checkbox" :checked="${() => state.saveChecklist.turn_signals}" @click="${() => state.saveChecklist.turn_signals = !state.saveChecklist.turn_signals}">
+              <input type="checkbox" checked="${() => state.saveChecklist.turn_signals}" @click="${() => state.saveChecklist.turn_signals = !state.saveChecklist.turn_signals}">
               <span class="label-text">Turn Signals</span>
               <span class="custom-checkbox"></span>
             </label>`}
@@ -1361,34 +1406,34 @@ export function ThemeMaker() {
               <button class="${() => `tab-button ${state.activeTab === tab ? "active" : ""}`}"
                 @click="${() => {
                   state.activeTab = tab;
-                  const themesList = document.querySelector('.themes-list');
+                  const themesList = document.querySelector(".themes-list");
                   if (themesList) themesList.scrollTop = 0;
                 }}">${tab.replace("_", " ").replace(/\b\w/g, l => l.toUpperCase())}</button>
             `)}
           </div>
           <div class="themes-list">
-            ${() => state.themes.filter(theme => {
+            ${() => { const _list = state.themes.filter(theme => {
               if (state.activeTab === "steering_wheel") {
                 return theme.type === "steering_wheel" || (theme.type === "holiday" && theme.hasSteeringWheel);
               }
               const key = `has${state.activeTab.charAt(0).toUpperCase() + state.activeTab.slice(1).replace(/_([a-z])/g, g => g[1].toUpperCase())}`;
               return theme[key];
-            }).map(theme => html`
-              <div class="theme-item" @click="${() => !state.isLoadingAsset && loadThemeAsset(theme, state.activeTab)}">
-                <span class="theme-button">${theme.name} ${theme.is_user_created ? " 🌟" : ""}</span>
+            }); return _list.length ? _list.map(theme => html`
+              <div class="theme-item" role="button" tabindex="0" @click="${() => !state.isLoadingAsset && loadThemeAsset(theme, state.activeTab)}" @keydown="${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); !state.isLoadingAsset && loadThemeAsset(theme, state.activeTab); } }}">
+                <span class="theme-button">${() => theme.name} ${() => theme.is_user_created ? " 🌟" : ""}</span>
                 ${() => {
                   const key = `localHas${state.activeTab
                     .replace(/_([a-z])/g, (_, c) => c.toUpperCase())
                     .replace(/^[a-z]/, c => c.toUpperCase())}`;
                   if (theme.type !== "holiday" && theme[key]) {
                     return html`
-                      <button class="delete-theme-button" @click="${(e) => { e.stopPropagation(); confirmDelete(theme); }}">
+                      <button class="delete-theme-button" aria-label="Delete ${theme.name} theme" @click="${(e) => { e.stopPropagation(); confirmDelete(theme); }}">
                         <i class="bi bi-trash-fill"></i>
                       </button>
                     `;
                   }
                   return isDownloadable(state.activeTab, theme.name) ? html`
-                    <button class="download-theme-button"
+                    <button class="download-theme-button" aria-label="Download ${theme.name} theme"
                       @click="${async (e) => {
                         e.stopPropagation();
                         if (state.isLoadingAsset) return;
@@ -1399,7 +1444,7 @@ export function ThemeMaker() {
                   ` : "";
                 }}
               </div>
-            `)}
+            `) : html`<div class="theme-item" style="justify-content:center;cursor:default;">No themes available.</div>`; }}
           </div>
         `,
         onCancel: () => state.showManageThemesModal = false,
@@ -1424,12 +1469,12 @@ export function ThemeMaker() {
       message: html`
       <div
         class="draggable-list"
-        @dragover.prevent
+        @dragover="${(e) => e.preventDefault()}"
       >
         ${() => state.sequentialImages.map((item, index) => {
           const file = fileStore.sequentialFiles[index] ||
             fileStore.sequentialFiles.find(f => f && f.name === item);
-          const imageUrl = file ? URL.createObjectURL(file) : '';
+          const imageUrl = getSeqUrl(file);
           return html`
             <div
               class="draggable-item"
@@ -1440,14 +1485,18 @@ export function ThemeMaker() {
               @dragleave="${handleDragLeave}"
               @dragend="${handleDragEnd}"
             >
-              <img src="${imageUrl}" alt="${item}" class="sequential-image-preview" />
-              <span>${item}</span>
+              <img src="${imageUrl}" alt="${() => item}" class="sequential-image-preview" />
+              <span>${() => item}</span>
+              <div class="seq-move-buttons">
+                <button type="button" class="seq-move-btn" aria-label="${() => "Move " + item + " up"}" disabled="${() => index === 0}" @click="${() => moveSequential(index, -1)}">↑</button>
+                <button type="button" class="seq-move-btn" aria-label="${() => "Move " + item + " down"}" disabled="${() => index === state.sequentialImages.length - 1}" @click="${() => moveSequential(index, 1)}">↓</button>
+              </div>
             </div>
           `;
         })}
       </div>
       `,
-      onCancel: () => state.showSequenceOrderModal = false,
+      onCancel: () => { state.showSequenceOrderModal = false; revokeSeqUrls(); },
       cancelText: "Close"
     })}
     </div>`;

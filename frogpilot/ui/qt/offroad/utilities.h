@@ -8,18 +8,9 @@ class FrogPilotUtilitiesPanel : public FrogPilotListWidget {
 public:
   explicit FrogPilotUtilitiesPanel(FrogPilotSettingsWindow *parent);
 
-protected:
-  void showEvent(QShowEvent *event) override;
-
 private:
-  ButtonControl *pondButton;
-
   FrogPilotSettingsWindow *parent;
 
   Params params;
   Params params_memory{"/dev/shm/params"};
-
-  QNetworkAccessManager *networkManager;
-
-  QTimer *pairingPollTimer;
 };

@@ -1,5 +1,6 @@
-import { html, reactive } from "https://esm.sh/@arrow-js/core"
+import { html, reactive } from "/assets/vendor/arrow.mjs"
 import { Modal } from "/assets/components/modal.js";
+import { onRouteLeave } from "/assets/components/router.js"
 
 const state = reactive({
   loading: true,
@@ -9,6 +10,7 @@ const state = reactive({
   showDeleteModal: false,
   recordingToDelete: null,
   showDeleteAllModal: false,
+  isDeletingAll: false,
   progress: 0,
   total: 0,
 })
@@ -21,6 +23,7 @@ function getOrdinalSuffix(n) {
 
 function formatScreenRecordingDate(dateString) {
   const date = new Date(dateString);
+  if (isNaN(date)) return "Unknown date";
   const month = date.toLocaleString("en-US", { month: "long" });
   const day = date.getDate();
   const year = date.getFullYear();
@@ -33,10 +36,14 @@ function formatScreenRecordingDate(dateString) {
   return `${month} ${day}${getOrdinalSuffix(day)}, ${year} - ${hour}:${minuteStr}${ampm}`;
 }
 
+let recordingsController = null
 
 async function fetchRecordings() {
+  if (recordingsController) recordingsController.abort()
+  const controller = new AbortController()
+  recordingsController = controller
   try {
-    const response = await fetch("/api/screen_recordings/list");
+    const response = await fetch("/api/screen_recordings/list", { signal: controller.signal });
     if (!response.ok) throw new Error("Network response was not ok");
 
     const reader = response.body.getReader();
@@ -46,6 +53,7 @@ async function fetchRecordings() {
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
+      if (controller.signal.aborted) return;
 
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n\n");
@@ -69,76 +77,111 @@ async function fetchRecordings() {
       }
     }
   } catch (_) {
+    if (controller.signal.aborted) return;
     state.error = "Couldn't load recordings. Please try again later..."
   } finally {
-    state.loading = false
+    if (recordingsController === controller) state.loading = false
   }
 }
 
 fetchRecordings()
+onRouteLeave(() => { if (recordingsController) recordingsController.abort() })
 
 function refresh() {
+  if (recordingsController) recordingsController.abort()
+  state.error = null
   state.loading = true
   state.recordings = []
   fetchRecordings()
 }
 
 let overlay = null
+let overlayOpener = null
 
-function openDialog(htmlStr) {
+function openDialog(template) {
+  const opener = document.activeElement
   const o = document.createElement("div")
   o.className = "dialog-overlay"
-  o.innerHTML = htmlStr
+  template(o)
   document.body.appendChild(o)
+  const box = o.querySelector(".dialog-box")
+  if (box) {
+    box.setAttribute("role", "dialog")
+    box.setAttribute("aria-modal", "true")
+    const heading = box.querySelector("p")
+    if (heading) box.setAttribute("aria-label", heading.textContent.trim())
+  }
+  o.__opener = opener
+  const input = o.querySelector(".rn-input")
+  if (input) input.focus()
+  o.addEventListener("keydown", e => {
+    if (e.key === "Escape") {
+      e.preventDefault()
+      closeDialog(o)
+      return
+    }
+    if (e.key === "Tab") {
+      const focusable = o.querySelectorAll(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+      )
+      if (!focusable.length) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      const active = document.activeElement
+      if (e.shiftKey && active === first) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault()
+        first.focus()
+      }
+    }
+  })
   return o
 }
 
-function closeDialog(o) { if (o) o.remove() }
+function closeDialog(o) { if (o) { const opener = o.__opener; o.remove(); if (opener && opener.focus) opener.focus(); } }
 
 async function renameFile(rec) {
   const base = rec.filename.replace(/\.mp4$/i, "")
-  const dlg = openDialog(`
-    <div class="dialog-box">
-      <p>Rename “${rec.filename}”</p>
-      <input class="rn-input" value="${base}" />
-      <div class="dialog-buttons">
-        <button class="btn-cancel">Cancel</button>
-        <button class="btn-save">Save</button>
-      </div>
-    </div>`)
-  dlg.querySelector(".btn-cancel").onclick = () => closeDialog(dlg)
-  dlg.querySelector(".btn-save").onclick = async () => {
+  const onSave = async () => {
     const val = dlg.querySelector(".rn-input").value.trim()
     if (!val) return
     const oldFilename = rec.filename
     const newFilename = val + ".mp4"
 
-    const res = await fetch("/api/screen_recordings/rename", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ old: oldFilename, new: newFilename }),
-    })
+    try {
+      const res = await fetch("/api/screen_recordings/rename", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ old: oldFilename, new: newFilename }),
+      })
 
-    if (res.ok) {
-      closeDialog(dlg)
+      if (res.ok) {
+        closeDialog(dlg)
 
-      const recordingToUpdate = state.recordings.find(r => r.filename === oldFilename)
-      if (recordingToUpdate) {
-        recordingToUpdate.filename = newFilename
-        recordingToUpdate.is_custom_name = true
-        recordingToUpdate.gif = `/screen_recordings/${val}.gif`
-        recordingToUpdate.png = `/screen_recordings/${val}.png`
+        const overlayTitleSpan = overlay && overlay.querySelector(".media-player-title span");
+        if (overlayTitleSpan) {
+          overlayTitleSpan.textContent = val.replace(/_/g, " ");
+        }
+        refresh()
+        showSnackbar("Recording renamed!")
+      } else {
+        showSnackbar("Rename failed...", "error")
       }
-
-      const overlayTitleSpan = overlay.querySelector(".media-player-title span");
-      if (overlayTitleSpan) {
-        overlayTitleSpan.textContent = val.replace(/_/g, " ");
-      }
-      showSnackbar("Recording renamed!")
-    } else {
+    } catch {
       showSnackbar("Rename failed...", "error")
     }
   }
+  const dlg = openDialog(html`
+    <div class="dialog-box">
+      <p>Rename “${() => rec.filename}”</p>
+      <input class="rn-input" aria-label="New recording name" .value="${() => base}" @keydown="${e => { if (e.key === 'Enter') { e.preventDefault(); onSave(); } }}" />
+      <div class="dialog-buttons">
+        <button class="btn-cancel" @click="${() => closeDialog(dlg)}">Cancel</button>
+        <button class="btn-save" @click="${onSave}">Save</button>
+      </div>
+    </div>`)
 }
 
 function confirmDeleteFile(rec) {
@@ -150,52 +193,61 @@ async function deleteFile() {
   if (!state.recordingToDelete) return;
   const rec = state.recordingToDelete;
 
-  const res = await fetch(`/api/screen_recordings/delete/${encodeURIComponent(rec.filename)}`, { method: "DELETE" })
-  if (res.ok) {
-      closeOverlay();
-      refresh();
-      showSnackbar("Recording deleted!");
-  } else {
-      showSnackbar("Delete failed...", "error");
+  try {
+    const res = await fetch(`/api/screen_recordings/delete/${encodeURIComponent(rec.filename)}`, { method: "DELETE" })
+    if (res.ok) {
+        closeOverlay();
+        refresh();
+        showSnackbar("Recording deleted!");
+    } else {
+        showSnackbar("Delete failed...", "error");
+    }
+  } catch {
+    showSnackbar("Delete failed...", "error");
+  } finally {
+    state.showDeleteModal = false;
+    state.recordingToDelete = null;
   }
-
-  state.showDeleteModal = false;
-  state.recordingToDelete = null;
 }
 
 function openOverlay(rec) {
   if (overlay) return
+  overlayOpener = document.activeElement
   overlay = document.createElement("div")
   overlay.className = "media-player-overlay"
-  const displayName = rec.is_custom_name ? rec.filename.replace(/\.mp4$/i, "") : formatScreenRecordingDate(rec.timestamp);
-  overlay.innerHTML = `
-    <div class="media-player-content">
-      <div class="media-player-title">
-        <span>${displayName}</span>
-        <i class="bi bi-pencil-fill action-rename-icon"></i>
-      </div>
-      <video controls autoplay muted>
-        <source src="/api/screen_recordings/download/${rec.filename}" type="video/mp4">
-      </video>
-      <div class="button-row">
-        <button class="close-button action-close">Close</button>
-        <button class="close-button action-download">Download</button>
-        <button class="close-button action-delete">Delete</button>
-      </div>
-    </div>`
-  overlay.addEventListener("click", e => { if (e.target === overlay) closeOverlay() })
-  overlay.querySelector(".action-close").onclick = closeOverlay
-  overlay.querySelector(".action-rename-icon").onclick = () => renameFile(rec)
-  overlay.querySelector(".action-delete").onclick = () => confirmDeleteFile(rec)
-  overlay.querySelector(".action-download").onclick = () => {
+  const displayName = rec.is_custom_name ? rec.filename.replace(/\.mp4$/i, "").replace(/_/g, " ") : formatScreenRecordingDate(rec.timestamp);
+  const downloadUrl = `/api/screen_recordings/download/${encodeURIComponent(rec.filename)}`
+  const onDownload = () => {
     const link = document.createElement("a");
-    link.href = `/api/screen_recordings/download/${rec.filename}`;
+    link.href = downloadUrl;
     link.download = rec.filename;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
   }
+  html`
+    <div class="media-player-content">
+      <div class="media-player-title">
+        <span>${() => displayName}</span>
+        <button type="button" class="action-rename-icon" aria-label="Rename recording" @click="${() => renameFile(rec)}"><i class="bi bi-pencil-fill"></i></button>
+      </div>
+      <video controls autoplay muted>
+        <source src="${downloadUrl}" type="video/mp4">
+      </video>
+      <div class="button-row">
+        <button class="close-button action-close" @click="${closeOverlay}">Close</button>
+        <button class="close-button action-download" @click="${onDownload}">Download</button>
+        <button class="close-button action-delete" @click="${() => confirmDeleteFile(rec)}">Delete</button>
+      </div>
+    </div>`(overlay)
+  overlay.addEventListener("click", e => { if (e.target === overlay) closeOverlay() })
+  overlay.addEventListener("keydown", e => { if (e.key === "Escape") { e.preventDefault(); closeOverlay() } })
+  overlay.setAttribute("role", "dialog")
+  overlay.setAttribute("aria-modal", "true")
+  overlay.setAttribute("aria-label", displayName ? `Recording: ${displayName}` : "Recording")
   document.body.appendChild(overlay)
+  const closeBtn = overlay.querySelector(".action-close")
+  if (closeBtn) closeBtn.focus()
 }
 
 function closeOverlay() {
@@ -203,6 +255,8 @@ function closeOverlay() {
   overlay.remove()
   overlay = null
   state.selectedRecording = null
+  if (overlayOpener && overlayOpener.focus) overlayOpener.focus()
+  overlayOpener = null
 }
 
 async function deleteAllRecordings() {
@@ -221,6 +275,7 @@ async function deleteAllRecordings() {
 }
 
 export function ScreenRecordings() {
+  onRouteLeave(closeOverlay)
   if (state.selectedRecording && !overlay) openOverlay(state.selectedRecording)
 
   return html`
@@ -240,12 +295,16 @@ export function ScreenRecordings() {
           return ""
         }}
 
-        <div class="screen-recordings-grid">
+        <div class="screen-recordings-grid ${() => state.isDeletingAll ? "disabled" : ""}">
           ${() => state.recordings.map(rec => {
             const displayName = rec.is_custom_name ? rec.filename.replace(/\.mp4$/i, "").replace(/_/g, " ") : formatScreenRecordingDate(rec.timestamp)
             return html`
               <div
                 class="recording-card"
+                role="button"
+                tabindex="0"
+                aria-label="${() => "Open recording " + displayName}"
+                @keydown="${e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); state.selectedRecording = rec; } }}"
                 @mouseenter="${e => {
                   if (state.selectedRecording) return;
 
@@ -288,10 +347,10 @@ export function ScreenRecordings() {
                 @click="${() => { state.selectedRecording = rec }}"
               >
                 <div class="recording-preview-container">
-                  <img src="${rec.png}" class="recording-preview recording-preview-png" style="display:block;">
+                  <img src="${rec.png}" class="recording-preview recording-preview-png" style="display:block;" @error="${e => { e.target.style.visibility = 'hidden' }}">
                   <img data-src="${rec.gif}" class="recording-preview recording-preview-gif" style="display:none;">
                 </div>
-                <p class="recording-filename">${displayName}</p>
+                <p class="recording-filename">${() => displayName}</p>
               </div>
             `
           })}
@@ -303,8 +362,9 @@ export function ScreenRecordings() {
               <button
                 class="delete-all-button"
                 @click="${() => (state.showDeleteAllModal = true)}"
+                disabled="${() => state.isDeletingAll}"
               >
-                Delete All Recordings
+                ${() => (state.isDeletingAll ? "Deleting..." : "Delete All Recordings")}
               </button>
             `
           }
@@ -313,7 +373,7 @@ export function ScreenRecordings() {
       </div>
       ${() => state.showDeleteModal ? Modal({
           title: "Confirm Delete",
-          message: `Are you sure you want to delete <strong>${state.recordingToDelete.filename}</strong>?`,
+          message: html`Are you sure you want to delete <strong>${() => state.recordingToDelete?.filename ?? ""}</strong>?`,
           onConfirm: deleteFile,
           onCancel: () => { state.showDeleteModal = false; state.recordingToDelete = null; },
           confirmText: "Delete"

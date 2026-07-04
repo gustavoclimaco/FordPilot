@@ -190,6 +190,7 @@ FrogPilotVehiclesPanel::FrogPilotVehiclesPanel(FrogPilotSettingsWindow *parent) 
     {"ToyotaToggles", tr("Toyota/Lexus Settings"), tr("<b>FrogPilot features for Lexus and Toyota vehicles.</b>"), ""},
     {"ToyotaDoors", tr("Automatically Lock/Unlock Doors"), tr("<b>Automatically lock/unlock doors</b> when shifting in and out of drive."), ""},
     {"ClusterOffset", tr("Dashboard Speed Offset"), tr("<b>The speed offset openpilot uses to match the speed on the dashboard display.</b>"), ""},
+    {"ToyotaDSUBypass", tr("DSU Re-Route Harness"), tr("<b>Enable openpilot longitudinal control using a DSU re-route harness.</b> This harness wires the DSU's ACC messages onto the camera CAN bus so openpilot can send its own longitudinal commands. Only enable this after physically installing the harness on your TSS-P vehicle."), ""},
     {"FrogsGoMoosTweak", tr("FrogsGoMoo's Personal Tweaks"), tr("<b>Personal tweaks by FrogsGoMoo for quicker acceleration and smoother braking.</b>"), ""},
     {"LockDoorsTimer", tr("Lock Doors On Ignition Off After"), tr("<b>Automatically lock the doors on ignition off</b> when no one is detected in the front seats."), ""},
     {"SNGHack", tr("Stop-and-Go Hack"), tr("<b>Force stop-and-go</b> on Lexus/Toyota vehicles without stock stop-and-go functionality."), ""},
@@ -313,7 +314,7 @@ FrogPilotVehiclesPanel::FrogPilotVehiclesPanel(FrogPilotSettingsWindow *parent) 
 
   static_cast<FrogPilotParamValueControl*>(toggles["LockDoorsTimer"])->setWarning("<b>Warning:</b> openpilot can't detect if keys are still inside the car, so ensure you have a spare key to prevent accidental lockouts!");
 
-  QSet<QString> rebootKeys = {"HondaAltTune", "NewLongAPI", "TacoTuneHacks"};
+  QSet<QString> rebootKeys = {"HondaAltTune", "NewLongAPI", "TacoTuneHacks", "ToyotaDSUBypass"};
   for (const QString &key : rebootKeys) {
     QObject::connect(static_cast<ToggleControl*>(toggles[key]), &ToggleControl::toggleFlipped, [key, this](bool state) {
       if (started) {
@@ -437,6 +438,10 @@ void FrogPilotVehiclesPanel::updateToggles() {
 
     else if (key == "TacoTuneHacks") {
       setVisible &= parent->isHKGCanFd;
+    }
+
+    else if (key == "ToyotaDSUBypass") {
+      setVisible &= parent->canUseSDSU && !parent->hasSDSU;
     }
 
     else if (key == "VoltSNG") {

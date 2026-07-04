@@ -27,7 +27,6 @@ private:
   bool mapboxPublicKeySet;
   bool mapboxSecretKeySet;
   bool setupCompleted;
-  bool updatingLimits;
 
   ButtonControl *amapKeyControl1;
   ButtonControl *amapKeyControl2;

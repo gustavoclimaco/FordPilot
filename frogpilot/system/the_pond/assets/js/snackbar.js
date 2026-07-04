@@ -1,7 +1,17 @@
 function showSnackbar(msg, level, timeout = 3500) {
-  const wrapper = document.getElementById("snackbar_wrapper")
+  let wrapper = document.getElementById("snackbar_wrapper")
 
-  // Ensure max 2 snackbars are visible
+  if (!wrapper) {
+    wrapper = document.createElement("div")
+    wrapper.id = "snackbar_wrapper"
+    wrapper.setAttribute("role", "status")
+    wrapper.setAttribute("aria-live", "polite")
+    document.body.appendChild(wrapper)
+  } else {
+    if (!wrapper.hasAttribute("role")) wrapper.setAttribute("role", "status")
+    if (!wrapper.hasAttribute("aria-live")) wrapper.setAttribute("aria-live", "polite")
+  }
+
   if (wrapper.children.length >= 2) {
     const first = wrapper.children[0]
     first.style.opacity = 0
@@ -9,12 +19,15 @@ function showSnackbar(msg, level, timeout = 3500) {
   }
 
   const snackbar = document.createElement("div")
-  snackbar.innerHTML = msg
+  snackbar.textContent = msg
   snackbar.className = "snackbar show"
   snackbar.id = `snackbar_${Math.random().toString(36).slice(5)}`
 
   if (level === "error") {
     snackbar.style.backgroundColor = "#f44336"
+    snackbar.setAttribute("role", "alert")
+  } else if (level === "success") {
+    snackbar.style.backgroundColor = "var(--success-bg)"
   }
 
   wrapper.appendChild(snackbar)

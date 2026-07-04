@@ -230,7 +230,7 @@ void FrogPilotMapsPanel::cancelDownload() {
 
   std::system("pkill mapd");
 
-  QTimer::singleShot(2500, [this]() {
+  QTimer::singleShot(2500, this, [this]() {
     cancellingDownload = false;
 
     downloadMapsButton->setEnabled(true);

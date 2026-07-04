@@ -1,6 +1,7 @@
-import { html, reactive } from "https://esm.sh/@arrow-js/core"
+import { html, reactive } from "/assets/vendor/arrow.mjs"
 import { formatSecondsToHuman } from "/assets/js/utils.js"
 import { Modal } from "/assets/components/modal.js";
+import { onRouteLeave } from "/assets/components/router.js"
 
 const logSelectorState = reactive({
   loading: false,
@@ -83,12 +84,15 @@ function TmuxLogSelector({ action, closeFn }) {
 
   async function confirmRenameFile() {
     const file = logSelectorState.logToRename;
-    let newName = logSelectorState.newName.trim();
-    if (!newName.endsWith(".json")) {
-      newName += ".json";
+    const base = logSelectorState.newName.trim();
+    if (!file || !base) {
+      logSelectorState.logToRename = null;
+      logSelectorState.newName = "";
+      return;
     }
+    const newName = base.endsWith(".json") ? base : base + ".json";
 
-    if (!file || !newName || newName === file.filename) {
+    if (newName === file.filename) {
       logSelectorState.logToRename = null;
       logSelectorState.newName = "";
       return;
@@ -112,8 +116,13 @@ function TmuxLogSelector({ action, closeFn }) {
     }
   }
 
+  requestAnimationFrame(() => {
+    const w = document.querySelector(".tmux-log-selector-wrapper");
+    if (w && !w.contains(document.activeElement)) w.focus();
+  });
+
   return html`
-    <div class="tmux-log-selector-wrapper" @click="${(e) => e.target === e.currentTarget && closeFn()}">
+    <div class="tmux-log-selector-wrapper" role="dialog" aria-modal="true" aria-label="Select a tmux log" tabindex="-1" @click="${(e) => e.target === e.currentTarget && closeFn()}" @keydown="${(e) => { if (e.key === 'Escape' && !logSelectorState.logToDelete && !logSelectorState.logToRename) { e.preventDefault(); closeFn(); } }}">
       <div id="fileList">
         <div class="fileEntry header">
           <p>Filename</p>
@@ -129,10 +138,12 @@ function TmuxLogSelector({ action, closeFn }) {
             return html`<div class="fileEntry"><p>No tmux logs found!</p></div>`;
           }
           return logSelectorState.files.map(file => html`
-            <div class="fileEntry" @click="${() => handleFileClick(file)}">
-              <p><span class="label">Filename:</span> <span class="value">${file.filename}</span></p>
-              <p><span class="label">Date:</span> <span class="value">${file.date}</span></p>
-              <p><span class="label">Age:</span> <span class="value">${file.timeSince < 60 ? "just now" : `${formatSecondsToHuman(file.timeSince, "minutes")} ago`}</span></p>
+            <div class="fileEntry" role="button" tabindex="0"
+              @click="${() => handleFileClick(file)}"
+              @keydown="${(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleFileClick(file); } }}">
+              <p><span class="label">Filename:</span> <span class="value">${() => file.filename}</span></p>
+              <p><span class="label">Date:</span> <span class="value">${() => file.date}</span></p>
+              <p><span class="label">Age:</span> <span class="value">${() => file.timeSince < 60 ? "just now" : `${formatSecondsToHuman(file.timeSince, "minutes")} ago`}</span></p>
             </div>
           `);
         }}
@@ -141,7 +152,7 @@ function TmuxLogSelector({ action, closeFn }) {
 
         ${() => logSelectorState.logToDelete ? Modal({
           title: "Confirm Delete",
-          message: `Are you sure you want to delete <strong>${logSelectorState.logToDelete.filename}</strong>?`,
+          message: html`Are you sure you want to delete <strong>${() => logSelectorState.logToDelete.filename}</strong>?`,
           onConfirm: confirmDeleteFile,
           onCancel: () => { logSelectorState.logToDelete = null },
           confirmText: "Yes, Delete"
@@ -151,12 +162,13 @@ function TmuxLogSelector({ action, closeFn }) {
           title: "Rename Log",
           message: html`
             <div>
-              <p>Rename <strong>${logSelectorState.logToRename.filename}</strong> to:</p>
+              <p>Rename <strong>${() => logSelectorState.logToRename.filename}</strong> to:</p>
               <div style="margin-top: 10px;">
                 <input
                   class="modal-input"
+                  aria-label="New log filename"
                   type="text"
-                  value="${logSelectorState.newName}"
+                  .value="${() => logSelectorState.newName}"
                   @click="${e => e.stopPropagation()}"
                   @input="${(e) => logSelectorState.newName = e.target.value}"
                 />
@@ -179,8 +191,8 @@ function TmuxLogSelector({ action, closeFn }) {
 export function TmuxLog() {
   const state = reactive({
     paused: false,
-    latest: '',
-    log: '',
+    latest: "",
+    log: "",
     selectorAction: null,
   });
 
@@ -194,9 +206,10 @@ export function TmuxLog() {
   }
 
   event_source.onerror = err => {
-    console.error("Error receiving tmux log:", err);
-    event_source.close();
+    console.error("tmux log stream error (will auto-reconnect):", err);
   }
+
+  onRouteLeave(() => event_source.close())
 
   function togglePause () {
     state.paused = !state.paused;
@@ -249,17 +262,17 @@ export function TmuxLog() {
       <div class="tmux-wrapper">
         <div class="tmuxContainer">
           <div class="tmuxHeader">Tmux Live Log</div>
-          <pre class="tmuxLog">${() => state.log}</pre>
+          <pre class="tmuxLog">${() => state.log || "Waiting for tmux output…"}</pre>
         </div>
       </div>
 
       <div class="tmux-controls">
-        <button class="tmux-control-button" @click="${captureLog}">💾 Capture Log</button>
-        <button class="tmux-control-button" @click="${deleteSession}">🗑️ Delete Log</button>
-        <button class="tmux-control-button" @click="${confirmDeleteAllSessions}">🧨 Delete All Logs</button>
-        <button class="tmux-control-button" @click="${downloadSessions}">⬇️ Download Log</button>
-        <button class="tmux-control-button" @click="${togglePause}">${() => state.paused ? "▶️ Resume Log" : "⏸️ Pause Log"}</button>
-        <button class="tmux-control-button" @click="${() => state.selectorAction = 'rename'}">✏️ Rename Log</button>
+        <button class="tmux-control-button" @click="${captureLog}"><span aria-hidden="true">💾</span> Capture Log</button>
+        <button class="tmux-control-button" @click="${deleteSession}"><span aria-hidden="true">🗑️</span> Delete Log</button>
+        <button class="tmux-control-button" @click="${confirmDeleteAllSessions}"><span aria-hidden="true">🧨</span> Delete All Logs</button>
+        <button class="tmux-control-button" @click="${downloadSessions}"><span aria-hidden="true">⬇️</span> Download Log</button>
+        <button class="tmux-control-button" @click="${togglePause}">${() => state.paused ? html`<span aria-hidden="true">▶️</span> Resume Log` : html`<span aria-hidden="true">⏸️</span> Pause Log`}</button>
+        <button class="tmux-control-button" @click="${() => state.selectorAction = "rename"}"><span aria-hidden="true">✏️</span> Rename Log</button>
       </div>
 
       ${() => state.selectorAction

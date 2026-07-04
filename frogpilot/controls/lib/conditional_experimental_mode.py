@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import DT_MDL
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_safe_obstacle_distance, get_stopped_equivalence_factor
+from openpilot.selfdrive.modeld.constants import ModelConstants
 
-from openpilot.frogpilot.common.frogpilot_variables import CITY_SPEED_LIMIT, CRUISING_SPEED, THRESHOLD, params_memory
+from openpilot.frogpilot.common.frogpilot_variables import CITY_SPEED_LIMIT, CRUISING_SPEED, SLOWDOWN_PERCENTAGE, THRESHOLD, params_memory
+
+PREDICTED_LEAD_OBSTACLE_BUFFER = 15.0
+PREDICTED_LEAD_SPEED_DROP = 2.0
 
 class ConditionalExperimentalMode:
   def __init__(self, FrogPilotPlanner):
     self.frogpilot_planner = FrogPilotPlanner
 
     self.curvature_filter = FirstOrderFilter(0, 1, DT_MDL)
-    self.slow_lead_filter = FirstOrderFilter(0, 1, DT_MDL)
+    self.slow_lead_filter = FirstOrderFilter(0, 0.5, DT_MDL)
     self.stop_light_filter = FirstOrderFilter(0, 0.5, DT_MDL)
 
     self.curve_detected = False
@@ -71,19 +76,34 @@ class ConditionalExperimentalMode:
 
   def update_conditions(self, v_ego, sm, frogpilot_toggles):
     self.curve_detection(v_ego, frogpilot_toggles)
-    self.slow_lead(v_ego, frogpilot_toggles)
+    self.slow_lead(v_ego, sm, frogpilot_toggles)
     self.stop_sign_and_light(v_ego, sm, frogpilot_toggles.conditional_model_stop_time)
 
   def curve_detection(self, v_ego, frogpilot_toggles):
     self.curvature_filter.update(self.frogpilot_planner.road_curvature_detected or self.frogpilot_planner.driving_in_curve)
     self.curve_detected = self.curvature_filter.x >= THRESHOLD and v_ego > CRUISING_SPEED
 
-  def slow_lead(self, v_ego, frogpilot_toggles):
+  def slow_lead(self, v_ego, sm, frogpilot_toggles):
     if self.frogpilot_planner.tracking_lead:
       slower_lead = (v_ego - self.frogpilot_planner.lead_one.vLead) > CRUISING_SPEED and frogpilot_toggles.conditional_slower_lead
       stopped_lead = self.frogpilot_planner.lead_one.vLead < 1 and frogpilot_toggles.conditional_stopped_lead
 
-      self.slow_lead_filter.update(slower_lead or stopped_lead)
+      if sm["modelV2"].leadsV3[0].prob > frogpilot_toggles.lead_detection_probability:
+        lead_distances = [self.frogpilot_planner.lead_one.dRel + distance - sm["modelV2"].leadsV3[0].x[0] for distance in sm["modelV2"].leadsV3[0].x]
+        lead_velocities = [max(self.frogpilot_planner.lead_one.vLead + velocity - sm["modelV2"].leadsV3[0].v[0], 0) for velocity in sm["modelV2"].leadsV3[0].v]
+
+        future_lead_speed = min(lead_velocities[1:])
+
+        lead_obstacles = [lead_distances[index] + get_stopped_equivalence_factor(velocity) for index, velocity in enumerate(lead_velocities)]
+        relevant_lead = min(lead_obstacles[1:]) < get_safe_obstacle_distance(v_ego, self.frogpilot_planner.frogpilot_following.t_follow) + PREDICTED_LEAD_OBSTACLE_BUFFER
+
+        predicted_slower_lead = lead_velocities[0] - future_lead_speed >= PREDICTED_LEAD_SPEED_DROP and relevant_lead and frogpilot_toggles.conditional_slower_lead
+        predicted_stopped_lead = future_lead_speed < 1 and relevant_lead and frogpilot_toggles.conditional_stopped_lead
+      else:
+        predicted_slower_lead = False
+        predicted_stopped_lead = False
+
+      self.slow_lead_filter.update(slower_lead or stopped_lead or predicted_slower_lead or predicted_stopped_lead)
       self.slow_lead_detected = self.slow_lead_filter.x >= THRESHOLD
     else:
       self.slow_lead_filter.x = 0
@@ -93,7 +113,10 @@ class ConditionalExperimentalMode:
     if not sm["frogpilotCarState"].trafficModeEnabled:
       model_stopping = self.frogpilot_planner.model_length < v_ego * model_time
 
-      self.stop_light_filter.update(self.frogpilot_planner.model_stopped or model_stopping)
+      slow_hint_window = [velocity for time_index, velocity in zip(ModelConstants.T_IDXS, sm["modelV2"].velocity.x) if time_index > model_time]
+      slow_hint_detected = any(velocity <= SLOWDOWN_PERCENTAGE * v_ego for velocity in slow_hint_window) and not self.curve_detected
+
+      self.stop_light_filter.update(self.frogpilot_planner.model_stopped or model_stopping or slow_hint_detected)
       self.stop_light_detected = self.stop_light_filter.x >= THRESHOLD and not self.frogpilot_planner.tracking_lead
     else:
       self.stop_light_filter.x = 0

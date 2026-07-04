@@ -1,4 +1,4 @@
-import { html, reactive } from "https://esm.sh/@arrow-js/core";
+import { html, reactive } from "/assets/vendor/arrow.mjs";
 import {
   addRouteToMap,
   formatMetersToHuman,
@@ -10,6 +10,7 @@ import {
   highlightRoute,
 } from "./navigation_utilities.js";
 import { Modal } from "/assets/components/modal.js";
+import { onRouteLeave } from "/assets/components/router.js";
 
 function sha1hex(str) {
   const rot = (v, s) => (v << s) | (v >>> (32 - s));
@@ -101,38 +102,48 @@ async function setSpecial(favorite, type, state, loadFavoritesAlphabetically) {
   }
 }
 
+let map;
+let destinationMarker;
+let favoriteMarkers = [];
+let navInitStarted = false;
+const state = reactive({
+  amap1Key: undefined,
+  amap2Key: undefined,
+  canToggleProvider: false,
+  confirmedRoute: null,
+  confirmedRouteRefresh: 0,
+  destination: undefined,
+  favoriteRoutes: [],
+  favoriteToRemove: null,
+  favoriteToRename: null,
+  favoritesCount: 0,
+  favoritesVisible: false,
+  initialized: false,
+  isMetric: true,
+  lastPosition: undefined,
+  loadingRoute: false,
+  mapboxPublic: undefined,
+  mapboxSecret: undefined,
+  missingKeys: null,
+  newFavoriteName: "",
+  previousDestinations: [],
+  searchProvider: "mapbox",
+  selectedRoute: null,
+  showRemoveFavoriteModal: false,
+  showRenameFavoriteModal: false,
+  suggestions: "[]"
+});
+const searchFieldState = reactive({ value: "" });
+const sessionToken = crypto.randomUUID?.() || Math.random().toString(36).slice(2);
+
 export function NavDestination() {
-  let map;
-  let destinationMarker;
-  let favoriteMarkers = [];
-  const state = reactive({
-    amap1Key: undefined,
-    amap2Key: undefined,
-    canToggleProvider: false,
-    confirmedRoute: null,
-    confirmedRouteRefresh: 0,
-    destination: undefined,
-    favoriteToRemove: null,
-    favoriteToRename: null,
-    favoritesCount: 0,
-    favoritesVisible: false,
-    initialized: false,
-    isMetric: true,
-    lastPosition: undefined,
-    loadingRoute: false,
-    mapboxPublic: undefined,
-    mapboxSecret: undefined,
-    missingKeys: null,
-    newFavoriteName: "",
-    previousDestinations: "[]",
-    searchProvider: "mapbox",
-    selectedRoute: null,
-    showRemoveFavoriteModal: false,
-    showRenameFavoriteModal: false,
-    suggestions: "[]"
+  onRouteLeave(() => {
+    navInitStarted = false;
+    state.initialized = false;
+    state.missingKeys = null;
+    try { map?.remove(); } catch (e) {}
+    map = undefined;
   });
-  const searchFieldState = reactive({ value: "" });
-  const sessionToken = crypto.randomUUID?.() || Math.random().toString(36).slice(2);
 
   function areRoutesEqual(a, b) {
     return a?.routeHash && b?.routeHash && a.routeHash === b.routeHash;
@@ -243,22 +254,29 @@ export function NavDestination() {
   }
 
   async function getNavigationData() {
-    const res = await fetch("/api/navigation");
-    const data = await res.json();
-    state.mapboxPublic = data.mapboxPublic.trim();
-    state.mapboxSecret = data.mapboxSecret.trim();
-    state.amap1Key = data.amap1Key?.trim() || "";
-    state.amap2Key = data.amap2Key?.trim() || "";
+    let data;
+    try {
+      const res = await fetch("/api/navigation");
+      data = await res.json();
+    } catch {
+      state.missingKeys = true;
+      showSnackbar("Failed to load navigation data...", "error");
+      return;
+    }
+    state.mapboxPublic = (data.mapboxPublic || "").trim();
+    state.mapboxSecret = !!data.mapboxSecretSet;
+    state.amap1Key = !!data.amap1KeySet;
+    state.amap2Key = !!data.amap2KeySet;
     state.isMetric = data.isMetric ?? true;
-    const hasMapbox = !!state.mapboxPublic && !!state.mapboxSecret;
-    const hasAMap = !!state.amap1Key && !!state.amap2Key;
+    const hasMapbox = !!state.mapboxPublic && state.mapboxSecret;
+    const hasAMap = state.amap1Key && state.amap2Key;
     state.missingKeys = !hasMapbox;
     state.canToggleProvider = hasMapbox && hasAMap;
     state.searchProvider = hasMapbox ? "mapbox" : "";
     if (state.missingKeys) return;
     state.lastPosition = {
-      latitude: parseFloat(data.lastPosition.latitude),
-      longitude: parseFloat(data.lastPosition.longitude)
+      latitude: parseFloat(data.lastPosition?.latitude),
+      longitude: parseFloat(data.lastPosition?.longitude)
     };
     try {
       state.destination = JSON.parse(data.destination);
@@ -307,16 +325,15 @@ export function NavDestination() {
           q: val,
           limit: 4
         });
-        const res = await fetch(`https://api.mapbox.com/search/searchbox/v1/suggest?${params}`);
-        const data = await res.json();
-        state.suggestions = JSON.stringify(data.suggestions);
+        try {
+          const res = await fetch(`https://api.mapbox.com/search/searchbox/v1/suggest?${params}`);
+          const data = res.ok ? await res.json() : {};
+          state.suggestions = JSON.stringify(Array.isArray(data.suggestions) ? data.suggestions : []);
+        } catch {
+          showSnackbar("Search failed - check your connection...", "error");
+        }
       } else {
-        const auto = new AMap.Autocomplete({ city: "auto" });
-        auto.search(val, (status, result) => {
-          if (status === "complete" && result.tips) {
-            state.suggestions = JSON.stringify(result.tips);
-          }
-        });
+        state.suggestions = "[]";
       }
     }
   }
@@ -463,16 +480,15 @@ export function NavDestination() {
           q: val,
           limit: 4
         });
-        const res = await fetch(`https://api.mapbox.com/search/searchbox/v1/suggest?${params}`);
-        const data = await res.json();
-        state.suggestions = JSON.stringify(data.suggestions);
+        try {
+          const res = await fetch(`https://api.mapbox.com/search/searchbox/v1/suggest?${params}`);
+          const data = res.ok ? await res.json() : {};
+          state.suggestions = JSON.stringify(Array.isArray(data.suggestions) ? data.suggestions : []);
+        } catch {
+          showSnackbar("Search failed - check your connection...", "error");
+        }
       } else {
-        const auto = new AMap.Autocomplete({ city: "auto" });
-        auto.search(val, (status, result) => {
-          if (status === "complete" && result.tips) {
-            state.suggestions = JSON.stringify(result.tips);
-          }
-        });
+        state.suggestions = "[]";
       }
     }, 800);
   }
@@ -580,7 +596,10 @@ export function NavDestination() {
     });
   };
 
-  getNavigationData();
+  if (!navInitStarted) {
+    navInitStarted = true;
+    getNavigationData();
+  }
 
   return html`
     <div class="navigation-container">
@@ -592,7 +611,7 @@ export function NavDestination() {
                 <div class="keys-required-widget">
                   <div class="keys-required-title">Mapbox Keys Required</div>
                   <p class="keys-required-text">You must set both your public and secret Mapbox keys before using navigation features.</p>
-                  <a href="/navigation_keys" class="keys-required-button">Go to "Manage Keys"</a>
+                  <a href="/manage_navigation_keys" class="keys-required-button">Go to "Manage Keys"</a>
                 </div>
               </section>
             `
@@ -600,7 +619,7 @@ export function NavDestination() {
               <div class="map-wrapper">
                 <div class="search-wrapper">
                   <div class="search-controls">
-                    <input autocomplete="off" id="search-field" placeholder="Search here" value="${() => searchFieldState.value}" @input="${searchInput}" @keydown="${handleSearchKey}" />
+                    <input aria-label="Search for a destination" autocomplete="off" id="search-field" placeholder="Search here" value="${() => searchFieldState.value}" @input="${searchInput}" @keydown="${handleSearchKey}" />
                     ${() => (state.favoritesCount > 0 ? html`<button class="favorites-toggle-button" @click="${handleFavoritesClick}">❤️ Favorites</button>` : "")}
                     ${() => (state.canToggleProvider ? html`
                       <div class="search-provider-toggle">
@@ -623,7 +642,7 @@ export function NavDestination() {
                           cancelNavigationFn: () => {
                             state.selectedRoute = null;
                             state.confirmedRoute = null;
-                            state.suggestions = state.previousDestinations;
+                            state.suggestions = JSON.stringify(state.previousDestinations);
                             if (destinationMarker) destinationMarker.remove();
                           },
                           onConfirm: () => {
@@ -644,6 +663,8 @@ export function NavDestination() {
                           setHome: setHome,
                           setWork: setWork
                         });
+                      } else if (searchFieldState.value.trim().length >= 3) {
+                        return html`<div class="navigation-summary-widget">No results found</div>`;
                       }
                     }}
                   </div>
@@ -655,7 +676,7 @@ export function NavDestination() {
     </div>
     ${() => (state.showRemoveFavoriteModal ? Modal({
       title: "Remove Favorite",
-      message: `Are you sure you want to remove <strong>${state.favoriteToRemove?.name}</strong> from your favorites?`,
+      message: html`Are you sure you want to remove <strong>${() => state.favoriteToRemove?.name}</strong> from your favorites?`,
       onConfirm: removeFavorite,
       onCancel: () => { state.showRemoveFavoriteModal = false; state.favoriteToRemove = null; },
       confirmText: "Remove"
@@ -664,9 +685,9 @@ export function NavDestination() {
       title: "Rename Favorite",
       message: html`
         <div>
-          <p>Rename <strong>${state.favoriteToRename.name}</strong> to:</p>
+          <p>Rename <strong>${() => state.favoriteToRename.name}</strong> to:</p>
           <div style="margin-top: 10px;">
-            <input class="modal-input" type="text" value="${state.newFavoriteName}" @click="${e => e.stopPropagation()}" @input="${e => state.newFavoriteName = e.target.value}" />
+            <input class="modal-input" type="text" value="${() => state.newFavoriteName}" @click="${e => e.stopPropagation()}" @input="${e => state.newFavoriteName = e.target.value}" />
           </div>
         </div>
       `,
@@ -681,18 +702,18 @@ export function NavDestination() {
 function SearchSuggestions({ suggestions, selectSuggestion, removeFavorite, renameFavorite, setHome, setWork }) {
   const isFavorite = s => s.name && s.latitude != null && s.longitude != null && s.routeId;
   const item = s => html`
-    <div class="suggestion-item" @click="${() => selectSuggestion(s)}">
+    <div class="suggestion-item" role="button" tabindex="0" @click="${() => selectSuggestion(s)}" @keydown="${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectSuggestion(s); } }}">
       <p>
         ${s.is_home ? "🏠 " : ""}
         ${s.is_work ? "💼 " : ""}
-        ${s.name || s.address}
+        ${() => s.name || s.address}
       </p>
       ${isFavorite(s) ? html`
         <div class="favorite-actions">
-          <button class="home-favorite-button ${s.is_home ? "active" : ""}" title="Set as Home" @click="${e => { e.stopPropagation(); setHome(s); }}">🏠</button>
-          <button class="work-favorite-button ${s.is_work ? "active" : ""}" title="Set as Work" @click="${e => { e.stopPropagation(); setWork(s); }}">💼</button>
-          <button class="edit-favorite-button" title="Rename Favorite" @click="${e => { e.stopPropagation(); renameFavorite(s); }}">✏️</button>
-          <button class="remove-favorite-button" title="Remove from Favorites" @click="${e => { e.stopPropagation(); removeFavorite(s); }}">🗑️</button>
+          <button class="home-favorite-button ${s.is_home ? "active" : ""}" title="Set as Home" aria-label="Set as Home" @click="${e => { e.stopPropagation(); setHome(s); }}">🏠</button>
+          <button class="work-favorite-button ${s.is_work ? "active" : ""}" title="Set as Work" aria-label="Set as Work" @click="${e => { e.stopPropagation(); setWork(s); }}">💼</button>
+          <button class="edit-favorite-button" title="Rename Favorite" aria-label="Rename Favorite" @click="${e => { e.stopPropagation(); renameFavorite(s); }}">✏️</button>
+          <button class="remove-favorite-button" title="Remove from Favorites" aria-label="Remove from Favorites" @click="${e => { e.stopPropagation(); removeFavorite(s); }}">🗑️</button>
         </div>
       ` : ""}
     </div>
@@ -788,25 +809,30 @@ function NavigationDestination({
       await favoriteDestination();
     }
   }
-  const eta = new Date(Date.now() + duration * 1000);
-  const isLong = duration > 86400;
-  const timeStr = eta.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  const month = eta.toLocaleString([], { month: "long" });
-  const day = eta.getDate();
-  const year = eta.getFullYear();
-  const etaString = isLong ? `${month} ${day}${getOrdinalSuffix(day)}, ${year}, ${timeStr}` : timeStr;
+  const safeDistance = Number.isFinite(distance) ? distance : null;
+  const safeDuration = Number.isFinite(duration) ? duration : null;
+  let etaString = "—";
+  if (Number.isFinite(duration)) {
+    const eta = new Date(Date.now() + duration * 1000);
+    const isLong = duration > 86400;
+    const timeStr = eta.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const month = eta.toLocaleString([], { month: "long" });
+    const day = eta.getDate();
+    const year = eta.getFullYear();
+    etaString = isLong ? `${month} ${day}${getOrdinalSuffix(day)}, ${year}, ${timeStr}` : timeStr;
+  }
   return html`
     <div class="navigation-summary-widget">
-      <div class="navigation-summary-title">${name}</div>
+      <div class="navigation-summary-title">${() => name}</div>
       <div class="summary-row">
         <span class="emoji">🛣️</span>
         <span class="label">Distance:</span>
-        <span class="value">${formatMetersToHuman(distance, isMetric)}</span>
+        <span class="value">${safeDistance === null ? "—" : formatMetersToHuman(safeDistance, isMetric)}</span>
       </div>
       <div class="summary-row">
         <span class="emoji">⌛</span>
         <span class="label">Duration:</span>
-        <span class="value">${formatSecondsToHuman(duration)}</span>
+        <span class="value">${safeDuration === null ? "—" : formatSecondsToHuman(safeDuration)}</span>
       </div>
       <div class="summary-row">
         <span class="emoji">🕗</span>

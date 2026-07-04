@@ -1,4 +1,4 @@
-import { html, reactive } from "https://esm.sh/@arrow-js/core";
+import { html, reactive } from "/assets/vendor/arrow.mjs";
 
 function DiskUsage(disk) {
   const used = parseFloat(disk.usedPercentage) || 0;
@@ -6,7 +6,7 @@ function DiskUsage(disk) {
 
   return html`
     <div class="disk">
-      <p>${disk.used} used of ${disk.size}</p>
+      <p>${() => disk.used} used of ${() => disk.size}</p>
       <div class="progress">
         <div
           class="bar"
@@ -23,10 +23,10 @@ function DiskUsage(disk) {
 
 function DriveStat(title, stats = {}, defaultUnit) {
   const format = (n) =>
-    n?.toLocaleString("en-US", {
+    (Math.round(Number(n) || 0) + 0).toLocaleString("en-US", {
       minimumFractionDigits: 0,
       maximumFractionDigits: 0,
-    }) ?? "0";
+    });
 
   return html`
     <div class="drivingStat">
@@ -50,13 +50,14 @@ function renderSoftwareInfo(info = {}) {
 
   return fields.map(
     ([label, value]) =>
-      html`<p><strong>${label}:</strong> ${value ?? "Unknown"}</p>`
+      html`<p><strong>${() => label}:</strong> ${() => value ?? "Unknown"}</p>`
   );
 }
 
 function renderDiskUsageSection({ diskError, diskUsage }) {
   if (diskError) {
-    return html`<p>${diskError.join("<br>")}</p>`;
+    const lines = Array.isArray(diskError) ? diskError : [diskError];
+    return lines.map((line) => html`<p>${() => line}</p>`);
   }
   if (diskUsage?.length) {
     return diskUsage.map(DiskUsage);
@@ -101,48 +102,43 @@ export function Home() {
 
   return html`
     <div>
+    <div role="status" aria-live="polite" aria-busy="${() => state.isLoading}">
       ${() => {
         if (state.isLoading) {
           return html`<p>Loading...</p>`;
         }
-
         if (state.error) {
-          return html`<p class="error">Failed to load data: ${state.error}</p>`;
+          return html`<p class="error">Failed to load data: ${() => state.error}</p>`;
         }
-
-        if (state.data) {
-          const { driveStats, firehoseStats, softwareInfo } = state.data;
-          return html`
-            <h1>The Pond</h1>
-
-            <div class="drivingStats">
-              ${DriveStat("All Time", driveStats?.all, state.unit)}
-              ${DriveStat("Past Week", driveStats?.week, state.unit)}
-              ${DriveStat("FrogPilot", driveStats?.frogpilot, state.unit)}
-            </div>
-
-            <h2>Disk Usage</h2>
-            <div class="diskUsage">
-              ${renderDiskUsageSection(state.data)}
-            </div>
-
-            <h2>Firehose Segments</h2>
-            <div class="firehoseStats">
-              <p>
-                <strong>${(firehoseStats?.segments ?? 0).toLocaleString("en-US")}</strong>
-                segments in training data.
-              </p>
-            </div>
-
-            <h2>Software Info</h2>
-            <div class="softwareInfo">
-              <div class="softwareGrid">${renderSoftwareInfo(softwareInfo)}</div>
-            </div>
-          `;
+        if (!state.data) {
+          return html`<p>No data available.</p>`;
         }
-
-        return html`<p>No data available.</p>`;
+        return "";
       }}
+    </div>
+    ${() => {
+      if (!state.data) return "";
+      const { driveStats, softwareInfo } = state.data;
+      return html`
+        <h1>The Pond</h1>
+
+        <div class="drivingStats">
+          ${DriveStat("All Time", driveStats?.all, state.unit)}
+          ${DriveStat("Past Week", driveStats?.week, state.unit)}
+          ${DriveStat("FrogPilot", driveStats?.frogpilot, state.unit)}
+        </div>
+
+        <h2>Disk Usage</h2>
+        <div class="diskUsage">
+          ${renderDiskUsageSection(state.data)}
+        </div>
+
+        <h2>Software Info</h2>
+        <div class="softwareInfo">
+          <div class="softwareGrid">${renderSoftwareInfo(softwareInfo)}</div>
+        </div>
+      `;
+    }}
     </div>
   `;
 }

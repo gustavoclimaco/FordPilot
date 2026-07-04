@@ -24,7 +24,7 @@
 }
 
 .tskkeys-btn.apply:hover:enabled {
-  background-color: var(--success-hover-bg);
+  background-color: var(--success-bg);
 }
 
 .tskkeys-btn.apply:disabled {
@@ -52,6 +52,11 @@
   transform: var(--hover-scale-base);
 }
 
+.tskkeys-btn:focus-visible {
+  outline: 2px solid var(--focus-ring-color);
+  outline-offset: 2px;
+}
+
 .tskkeys-container {
   background-color: var(--secondary-bg);
   border-radius: var(--border-radius-md);
@@ -63,12 +68,8 @@
   transition: box-shadow var(--transition-fast), transform var(--transition-fast);
 }
 
-.tskkeys-container:hover {
-  transform: var(--hover-scale-sm);
-}
-
 .tskkeys-error {
-  color: var(--danger-bg);
+  color: var(--danger-text);
   font-size: var(--font-size-sm);
   transition: opacity var(--transition-slow);
 }
@@ -110,7 +111,7 @@
 }
 
 .tskkeys-input::placeholder {
-  color: var(--text-muted);
+  color: #c0c0c0;
 }
 
 .tskkeys-label {
@@ -121,7 +122,7 @@
 }
 
 .tskkeys-message {
-  color: var(--success-bg);
+  color: var(--success-text);
   font-size: var(--font-size-sm);
   transition: opacity var(--transition-slow);
 }
@@ -135,10 +136,6 @@
   gap: var(--gap-sm);
   margin-bottom: var(--margin-base);
   transition: transform var(--transition-fast);
-}
-
-.tskkeys-row:hover {
-  transform: var(--hover-scale-sm);
 }
 
 .tskkeys-select {
@@ -198,7 +195,7 @@
   justify-content: center;
 }
 
-@media only screen and (max-width: 768px) and (orientation: portrait) {
+@media only screen and (max-width: 768px) {
   .tskkeys-btn {
     font-size: var(--font-size-sm);
   }

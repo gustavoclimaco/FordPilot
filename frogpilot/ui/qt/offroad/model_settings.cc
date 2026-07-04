@@ -1,19 +1,32 @@
 #include "frogpilot/ui/qt/offroad/model_settings.h"
 
-bool hasAllTinygradFiles(const QDir &modelDir, const QString &modelKey) {
-  QStringList tinygradSuffixes = {
-    "_driving_policy_metadata.pkl",
-    "_driving_policy_tinygrad.pkl",
-    "_driving_vision_metadata.pkl",
-    "_driving_vision_tinygrad.pkl"
-  };
+const QStringList tinygradSuffixes = {
+  "_driving_policy_metadata.pkl",
+  "_driving_policy_tinygrad.pkl",
+  "_driving_vision_metadata.pkl",
+  "_driving_vision_tinygrad.pkl"
+};
 
+bool hasAllTinygradFiles(const QDir &modelDir, const QString &modelKey) {
   for (const QString &suffix : tinygradSuffixes) {
     if (!modelDir.exists(modelKey + suffix)) {
       return false;
     }
   }
   return true;
+}
+
+bool modelFileMatches(const QString &file, const QString &modelKey) {
+  if (file == modelKey + ".thneed") {
+    return true;
+  }
+
+  for (const QString &suffix : tinygradSuffixes) {
+    if (file == modelKey + suffix) {
+      return true;
+    }
+  }
+  return false;
 }
 
 QString normalizeModelKey(QString key) {
@@ -56,8 +69,7 @@ FrogPilotModelPanel::FrogPilotModelPanel(FrogPilotSettingsWindow *parent) : Frog
     {"ModelRandomizer", tr("Model Randomizer"), tr("<b>Select a random driving model each drive</b> and use feedback prompts at the end of the drive to help find the model that best suits you!"), ""},
     {"ManageBlacklistedModels", tr("Manage Model Blacklist"), tr("<b>Add or remove driving models from the \"Model Randomizer\" blacklist.</b>"), ""},
     {"ManageScores", tr("Manage Model Ratings"), tr("<b>View or reset saved model ratings</b> used by the \"Model Randomizer\"."), ""},
-    {"SelectModel", tr("Select Driving Model"), tr("<b>Choose which driving model openpilot uses.</b>"), ""},
-    {"UpdateTinygrad", tr("Update Model Manager"), tr("<b>Update the \"Model Manager\"</b> to support the latest models."), ""}
+    {"SelectModel", tr("Select Driving Model"), tr("<b>Choose which driving model openpilot uses.</b>"), ""}
   };
 
   for (const auto &[param, title, desc, icon] : modelToggles) {
@@ -68,9 +80,8 @@ FrogPilotModelPanel::FrogPilotModelPanel(FrogPilotSettingsWindow *parent) : Frog
       QObject::connect(deleteModelButton, &FrogPilotButtonsControl::buttonClicked, [this](int id) {
         QStringList deletableModels;
         for (const QString &file : modelDir.entryList(QDir::Files)) {
-          QString base = QFileInfo(file).baseName();
           for (const QString &modelKey : modelFileToNameMapProcessed.keys()) {
-            if (base.startsWith(modelKey)) {
+            if (modelFileMatches(file, modelKey)) {
               QString modelName = modelFileToNameMapProcessed.value(modelKey);
               if (!deletableModels.contains(modelName)) {
                 deletableModels.append(modelName);
@@ -87,21 +98,22 @@ FrogPilotModelPanel::FrogPilotModelPanel(FrogPilotSettingsWindow *parent) : Frog
           if (!modelToDelete.isEmpty() && ConfirmationDialog::confirm(tr("Are you sure you want to delete the \"%1\" model?").arg(modelToDelete), tr("Delete"), this)) {
             QString modelFile = modelFileToNameMapProcessed.key(modelToDelete);
             for (const QString &file : modelDir.entryList(QDir::Files)) {
-              QString base = QFileInfo(file).baseName();
-              if (base.startsWith(modelFile)) {
+              if (modelFileMatches(file, modelFile)) {
                 QFile::remove(modelDir.filePath(file));
               }
             }
 
             allModelsDownloaded = false;
+            deletableModels.removeAll(modelToDelete);
+            noModelsDownloaded = deletableModels.isEmpty();
+            deleteModelButton->setEnabled(!(allModelsDownloading || modelDownloading || noModelsDownloaded));
           }
         } else if (id == 1) {
           if (ConfirmationDialog::confirm(tr("Are you sure you want to delete all of your downloaded driving models?"), tr("Delete"), this)) {
             for (const QString &file : modelDir.entryList(QDir::Files)) {
-              QString base = QFileInfo(file).baseName();
               for (const QString &modelKey : modelFileToNameMapProcessed.keys()) {
                 QString modelName = modelFileToNameMapProcessed.value(modelKey);
-                if (deletableModels.contains(modelName) && base.startsWith(modelKey)) {
+                if (deletableModels.contains(modelName) && modelFileMatches(file, modelKey)) {
                   QFile::remove(modelDir.filePath(file));
                   break;
                 }
@@ -117,19 +129,7 @@ FrogPilotModelPanel::FrogPilotModelPanel(FrogPilotSettingsWindow *parent) : Frog
     } else if (param == "DownloadModel") {
       downloadModelButton = new FrogPilotButtonsControl(title, desc, icon, {tr("DOWNLOAD"), tr("DOWNLOAD ALL")});
       QObject::connect(downloadModelButton, &FrogPilotButtonsControl::buttonClicked, [this](int id) {
-        if (tinygradUpdate) {
-          if (FrogPilotConfirmationDialog::yesorno(tr("Tinygrad is out of date and must be updated before you can download new models. Update now?"), this)) {
-            if (FrogPilotConfirmationDialog::yesorno(tr("Updating Tinygrad will delete all existing Tinygrad-based models which will need to be re-downloaded. Proceed?"), this)) {
-              params_memory.putBool("UpdateTinygrad", true);
-              params_memory.put("ModelDownloadProgress", "Downloading...");
-
-              updateTinygradButton->setText(0, tr("CANCEL"));
-              updateTinygradButton->setValue(tr("Updating..."));
-
-              updatingTinygrad = true;
-            }
-          }
-        } else if (id == 0) {
+        if (id == 0) {
           if (modelDownloading) {
             params_memory.putBool("CancelModelDownload", true);
 
@@ -279,9 +279,8 @@ FrogPilotModelPanel::FrogPilotModelPanel(FrogPilotSettingsWindow *parent) : Frog
 
           QStringList deletableModels;
           for (const QString &file : modelDir.entryList(QDir::Files)) {
-            QString base = QFileInfo(file).baseName();
             for (const QString &modelKey : modelFileToNameMapProcessed.keys()) {
-              if (base.startsWith(modelKey)) {
+              if (modelFileMatches(file, modelKey)) {
                 QString modelName = modelFileToNameMapProcessed.value(modelKey);
                 if (!deletableModels.contains(modelName)) {
                   deletableModels.append(modelName);
@@ -295,30 +294,6 @@ FrogPilotModelPanel::FrogPilotModelPanel(FrogPilotSettingsWindow *parent) : Frog
         }
       });
       modelToggle = selectModelButton;
-
-    } else if (param == "UpdateTinygrad") {
-      updateTinygradButton = new FrogPilotButtonsControl(title, desc, icon, {tr("UPDATE")});
-      QObject::connect(updateTinygradButton, &FrogPilotButtonsControl::buttonClicked, [this]() {
-        if (updatingTinygrad) {
-          params_memory.putBool("CancelModelDownload", true);
-
-          updateTinygradButton->setEnabled(false);
-          updateTinygradButton->setValue(tr("Cancelling..."));
-
-          cancellingDownload = true;
-        } else {
-          if (FrogPilotConfirmationDialog::yesorno(tr("Updating Tinygrad will delete existing Tinygrad-based driving models and need to be re-downloaded. Proceed?"), this)) {
-            params_memory.putBool("UpdateTinygrad", true);
-            params_memory.put("ModelDownloadProgress", "Downloading...");
-
-            updateTinygradButton->setText(0, tr("CANCEL"));
-            updateTinygradButton->setValue(tr("Updating..."));
-
-            updatingTinygrad = true;
-          }
-        }
-      });
-      modelToggle = updateTinygradButton;
 
     } else {
       modelToggle = new ParamControl(param, title, desc, icon);
@@ -366,15 +341,9 @@ void FrogPilotModelPanel::showEvent(QShowEvent *event) {
 
   allModelsDownloading = params_memory.getBool("DownloadAllModels");
   modelDownloading = !params_memory.get("ModelDownloadProgress").empty();
-  tinygradUpdate = params.getBool("TinygradUpdateAvailable");
-  updatingTinygrad = params_memory.getBool("UpdateTinygrad");
-
-  modelDownloading &= !updatingTinygrad;
 
   QStringList availableModels = QString::fromStdString(params.get("AvailableModels")).split(",");
-  availableModels.sort();
   availableModelNames = QString::fromStdString(params.get("AvailableModelNames")).split(",");
-  availableModelNames.sort();
 
   modelFileToNameMap.clear();
   modelFileToNameMapProcessed.clear();
@@ -382,6 +351,8 @@ void FrogPilotModelPanel::showEvent(QShowEvent *event) {
     modelFileToNameMap.insert(availableModels[i], availableModelNames[i]);
     modelFileToNameMapProcessed.insert(availableModels[i], processModelName(availableModelNames[i]));
   }
+  availableModelNames = modelFileToNameMap.values();
+  availableModelNames.sort();
 
   QStringList downloadableModels = availableModelNames;
   for (const QString &modelKey : modelFileToNameMap.keys()) {
@@ -394,9 +365,8 @@ void FrogPilotModelPanel::showEvent(QShowEvent *event) {
 
   QStringList deletableModels;
   for (const QString &file : modelDir.entryList(QDir::Files)) {
-    QString base = QFileInfo(file).baseName();
     for (const QString &modelKey : modelFileToNameMapProcessed.keys()) {
-      if (base.startsWith(modelKey)) {
+      if (modelFileMatches(file, modelKey)) {
         QString modelName = modelFileToNameMapProcessed.value(modelKey);
         if (!deletableModels.contains(modelName)) {
           deletableModels.append(modelName);
@@ -419,13 +389,10 @@ void FrogPilotModelPanel::showEvent(QShowEvent *event) {
 
   deleteModelButton->setEnabled(!(allModelsDownloading || modelDownloading || noModelsDownloaded));
 
-  downloadModelButton->setEnabledButtons(0, !allModelsDownloaded && !allModelsDownloading && !cancellingDownload && !updatingTinygrad && fs.frogpilot_scene.online && parked);
-  downloadModelButton->setEnabledButtons(1, !allModelsDownloaded && !modelDownloading && !cancellingDownload && !updatingTinygrad && fs.frogpilot_scene.online && parked);
+  downloadModelButton->setEnabledButtons(0, !allModelsDownloaded && !allModelsDownloading && !cancellingDownload && fs.frogpilot_scene.online && parked);
+  downloadModelButton->setEnabledButtons(1, !allModelsDownloaded && !modelDownloading && !cancellingDownload && fs.frogpilot_scene.online && parked);
 
   downloadModelButton->setValue(fs.frogpilot_scene.online ? (parked ? "" : tr("Not parked")) : tr("Offline..."));
-
-  updateTinygradButton->setEnabled(!modelDownloading && !cancellingDownload && fs.frogpilot_scene.online && parked && tinygradUpdate);
-  updateTinygradButton->setValue(tinygradUpdate ? tr("Update available!") : tr("Up to date!"));
 
   started = s.scene.started;
 
@@ -468,7 +435,7 @@ void FrogPilotModelPanel::updateState(const UIState &s, const FrogPilotUIState &
     if (progress == "All models downloaded!" || progress == "Downloaded!" && !allModelsDownloading || downloadFailed) {
       finalizingDownload = true;
 
-      QTimer::singleShot(2500, [progress, this]() {
+      QTimer::singleShot(2500, this, [progress, this]() {
         allModelsDownloading = false;
         cancellingDownload = false;
         finalizingDownload = false;
@@ -494,76 +461,20 @@ void FrogPilotModelPanel::updateState(const UIState &s, const FrogPilotUIState &
     downloadModelButton->setValue(fs.frogpilot_scene.online ? (parked ? "" : tr("Not parked")) : tr("Offline..."));
   }
 
-  if (updatingTinygrad) {
-    QString progress = QString::fromStdString(params_memory.get("ModelDownloadProgress"));
-    bool downloadFailed = progress.contains(QRegularExpression("cancelled|exists|failed|missing|offline", QRegularExpression::CaseInsensitiveOption));
-
-    {
-      QString translatedProgress;
-      if (progress == "Downloading...") {
-        translatedProgress = tr("Downloading...");
-      } else if (progress == "Downloaded!") {
-        translatedProgress = tr("Downloaded!");
-      } else if (progress == "All models downloaded!") {
-        translatedProgress = tr("All models downloaded!");
-      } else if (progress.contains("cancelled", Qt::CaseInsensitive)) {
-        translatedProgress = tr("Download cancelled...");
-      } else if (progress.contains("failed", Qt::CaseInsensitive)) {
-        translatedProgress = tr("Download failed...");
-      } else if (progress.contains("offline", Qt::CaseInsensitive)) {
-        translatedProgress = tr("GitHub and GitLab are offline...");
-      } else if (progress == "Repository unavailable") {
-        translatedProgress = tr("Repository unavailable");
-      } else {
-        translatedProgress = progress;
-      }
-      updateTinygradButton->setValue(translatedProgress);
-    }
-
-    if (progress == "Updated!" && updatingTinygrad || downloadFailed) {
-      finalizingDownload = true;
-
-      QTimer::singleShot(2500, [progress, this]() {
-        modelDownloading = !params_memory.get("ModelDownloadProgress").empty();
-
-        if (modelDownloading) {
-          downloadModelButton->setText(1, tr("CANCEL"));
-
-          downloadModelButton->setValue(tr("Downloading..."));
-
-          downloadModelButton->setVisibleButton(0, false);
-        } else {
-          cancellingDownload = false;
-        }
-
-        tinygradUpdate = params.getBool("TinygradUpdateAvailable");
-
-        finalizingDownload = false;
-        updatingTinygrad = false;
-
-        updateTinygradButton->setEnabled(tinygradUpdate);
-        updateTinygradButton->setText(0, tr("UPDATE"));
-        updateTinygradButton->setValue(tinygradUpdate ? tr("Update available!") : tr("Up to date!"));
-      });
-    }
-  }
-
   deleteModelButton->setEnabled(!(allModelsDownloading || modelDownloading || noModelsDownloaded));
 
   downloadModelButton->setText(0, modelDownloading ? tr("CANCEL") : tr("DOWNLOAD"));
   downloadModelButton->setText(1, allModelsDownloading ? tr("CANCEL") : tr("DOWNLOAD ALL"));
 
-  downloadModelButton->setEnabledButtons(0, !allModelsDownloaded && !allModelsDownloading && !cancellingDownload && !finalizingDownload && !updatingTinygrad && fs.frogpilot_scene.online && parked);
-  downloadModelButton->setEnabledButtons(1, !allModelsDownloaded && !modelDownloading && !cancellingDownload && !finalizingDownload && !updatingTinygrad && fs.frogpilot_scene.online && parked);
+  downloadModelButton->setEnabledButtons(0, !allModelsDownloaded && !allModelsDownloading && !cancellingDownload && !finalizingDownload && fs.frogpilot_scene.online && parked);
+  downloadModelButton->setEnabledButtons(1, !allModelsDownloaded && !modelDownloading && !cancellingDownload && !finalizingDownload && fs.frogpilot_scene.online && parked);
 
   downloadModelButton->setVisibleButton(0, !allModelsDownloading);
   downloadModelButton->setVisibleButton(1, !modelDownloading);
 
-  updateTinygradButton->setEnabled(!modelDownloading && !cancellingDownload && !cancellingDownload && !finalizingDownload && fs.frogpilot_scene.online && parked && tinygradUpdate);
-
   started = s.scene.started;
 
-  parent->keepScreenOn = allModelsDownloading || modelDownloading || updatingTinygrad;
+  parent->keepScreenOn = allModelsDownloading || modelDownloading;
 }
 
 void FrogPilotModelPanel::updateModelLabels(FrogPilotListWidget *labelsList) {

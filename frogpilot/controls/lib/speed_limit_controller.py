@@ -320,7 +320,7 @@ class SpeedLimitController:
       next_latitude = next_map_speed_limit.get("latitude")
       next_longitude = next_map_speed_limit.get("longitude")
 
-      distance_to_upcoming = calculate_distance_to_point(current_latitude * CV.DEG_TO_RAD, current_longitude * CV.DEG_TO_RAD, next_latitude * CV.DEG_TO_RAD, next_longitude * CV.DEG_TO_RAD)
+      distance_to_upcoming = calculate_distance_to_point(current_latitude, current_longitude, next_latitude, next_longitude)
 
       if self.map_speed_limit < self.next_speed_limit:
         max_lookahead = self.frogpilot_toggles.map_speed_lookahead_higher * v_ego

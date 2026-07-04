@@ -21,8 +21,6 @@ ASSET_CHECK_RATE = (1 / DT_MDL)
 def assets_checks(model_manager, theme_manager, frogpilot_toggles):
   if params_memory.get_bool(MODEL_DOWNLOAD_ALL_PARAM):
     run_thread_with_lock("download_all_models", model_manager.download_all_models)
-  elif params_memory.get_bool("UpdateTinygrad"):
-    run_thread_with_lock("update_tinygrad", model_manager.update_tinygrad)
   else:
     model_to_download = params_memory.get(MODEL_DOWNLOAD_PARAM, encoding="utf-8")
     if model_to_download:
@@ -104,7 +102,7 @@ def frogpilot_thread():
         theme_manager.update_active_theme(time_validated, frogpilot_toggles, randomize_theme=True)
 
       if time_validated:
-        send_stats()
+        send_stats(json.loads(params.get("LastGPSPosition") or "{}"), params, frogpilot_toggles)
 
     elif started and not started_previously:
       if error_log.is_file():
@@ -165,6 +163,7 @@ def frogpilot_thread():
 
       theme_manager.update_active_theme(time_validated, frogpilot_toggles)
       run_thread_with_lock("update_checks", update_checks, (model_manager, now, theme_manager, frogpilot_toggles, True))
+
     rate_keeper.keep_time()
 
 def main():

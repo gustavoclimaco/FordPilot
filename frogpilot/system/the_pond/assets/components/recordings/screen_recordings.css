@@ -30,7 +30,9 @@
 .dialog-box {
   background: var(--secondary-bg);
   border-radius: var(--border-radius-lg);
+  box-sizing: border-box;
   color: var(--text-color);
+  max-width: calc(100vw - var(--margin-base));
   min-width: var(--width-md);
   padding: var(--padding-base);
   text-align: center;
@@ -47,6 +49,8 @@
 
 .dialog-box p {
   margin: 0 0 var(--margin-sm) 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .dialog-buttons {
@@ -65,6 +69,14 @@
   padding: var(--padding-sm) var(--padding-base);
 }
 
+.dialog-buttons .btn-cancel {
+  background: var(--color-gray-700);
+}
+
+.dialog-buttons .btn-save {
+  background: var(--color-confirm);
+}
+
 .dialog-overlay {
   align-items: center;
   background: rgba(0, 0, 0, var(--disabled-opacity));
@@ -79,6 +91,9 @@
 .media-player-content {
   background: var(--secondary-bg);
   border-radius: var(--border-radius-lg);
+  box-sizing: border-box;
+  max-height: 95vh;
+  overflow-y: auto;
   padding: var(--padding-base);
   text-align: center;
 }
@@ -95,9 +110,11 @@
 }
 
 .media-player-content video {
+  aspect-ratio: 16 / 9;
   border-radius: var(--border-radius-md);
-  height: var(--width-lg);
-  width: var(--width-xxl);
+  max-height: 80vh;
+  max-width: min(90vw, var(--width-xxl));
+  width: auto;
 }
 
 .media-player-overlay {
@@ -155,15 +172,26 @@
   font-weight: var(--font-weight-bold);
   justify-content: center;
   margin-bottom: var(--margin-base);
+  min-width: 0;
+  overflow-wrap: anywhere;
   text-align: center;
+  word-break: break-word;
 }
 
 .action-rename-icon {
+  appearance: none;
+  background: none;
+  border: none;
   cursor: pointer;
   margin-left: 10px;
+  padding: 0;
 }
 
 .media-player-title .action-rename-route {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0;
   cursor: pointer;
   position: absolute;
   right: 10px;
@@ -267,25 +295,21 @@
   width: 100%;
 }
 
-.screen-recordings-widget:hover {
-  box-shadow: var(--shadow-md);
-  transform: var(--hover-scale-sm);
-}
-
 .screen-recordings-wrapper {
   display: flex;
   justify-content: center;
 }
 
-@media only screen and (max-width: 768px) and (orientation: portrait) {
+@media only screen and (max-width: 768px) {
   .media-player-content {
     width: 90%;
     padding: var(--padding-sm);
   }
 
   .media-player-content video {
-    width: 90vw !important;
-    height: auto !important;
+    max-height: 80vh !important;
+    max-width: 90vw !important;
+    width: auto !important;
   }
 
   .button-row {

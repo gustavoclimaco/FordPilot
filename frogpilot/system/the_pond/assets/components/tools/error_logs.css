@@ -48,12 +48,6 @@
   width: 100%;
 }
 
-#errorLogs #fileList:hover,
-#errorLogs #fileViewer:hover {
-  box-shadow: var(--shadow-md);
-  transform: var(--hover-scale-sm);
-}
-
 #errorLogs #fileViewer {
   scrollbar-width: auto;
 }
@@ -63,32 +57,47 @@
   justify-content: space-between;
 }
 
+#errorLogs #fileViewer > div > p {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 #errorLogs #fileViewer a {
   color: inherit;
   text-decoration: none;
 }
 
 #errorLogs #fileViewer button {
+  align-items: center;
   background-color: transparent;
   border: none;
   border-radius: 50%;
-  color: var(--secondary-fg);
-  height: calc(3 * var(--border-width-thick));
+  box-sizing: border-box;
+  color: var(--text-color);
+  display: inline-flex;
+  flex-shrink: 0;
+  justify-content: center;
+  min-height: 44px;
+  min-width: 44px;
   padding: var(--padding-sm);
   transition:
     background-color var(--transition-base),
     box-shadow var(--transition-fast),
     color var(--transition-fast),
     transform var(--transition-fast);
-  width: calc(3 * var(--border-width-thick));
 }
 
-#errorLogs #fileViewer button:hover {
+#errorLogs #fileViewer button:hover,
+#errorLogs #fileViewer button:focus {
+  background-color: var(--sidebar-active-bg);
   transform: var(--hover-scale-sm);
 }
 
 #errorLogs #fileViewer pre {
-  color: var(--main-fg);
+  color: var(--text-color);
   font-family: var(--font-mono);
   white-space: pre-wrap;
   word-wrap: break-word;
@@ -143,6 +152,11 @@
 
 .error-logs-wrapper #errorLogs #fileList .fileEntry:hover {
   background-color: var(--sidebar-active-bg);
+}
+
+.error-logs-wrapper #errorLogs #fileList .fileEntry:focus-visible {
+  outline: 2px solid var(--text-color);
+  outline-offset: -2px;
 }
 
 .error-logs-wrapper #errorLogs #fileList .fileEntry.header {

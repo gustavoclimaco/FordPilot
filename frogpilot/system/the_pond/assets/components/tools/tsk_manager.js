@@ -1,4 +1,4 @@
-import { html, reactive } from "https://esm.sh/@arrow-js/core"
+import { html, reactive } from "/assets/vendor/arrow.mjs"
 import { Modal } from "/assets/components/modal.js"
 
 const state = reactive({
@@ -11,6 +11,7 @@ const state = reactive({
   message: "",
   error: "",
   visible: false,
+  busy: false,
   confirmDelete: {
     visible: false,
     keyName: ""
@@ -50,9 +51,9 @@ function canSave() {
   const value = state.keyValue
 
   if (
-    value.length < 10 ||
-    /\s/.test(name) ||
-    /\s/.test(value)
+    !name.trim() ||
+    !/^[0-9a-fA-F]{32}$/.test(value) ||
+    /\s/.test(name)
   ) {
     return false
   }
@@ -76,6 +77,12 @@ function selectKey(name) {
     state.keyValue = selected.value
     state.saved = true
     state.editMode = false
+  } else {
+    state.selectedKeyName = ""
+    state.keyName = ""
+    state.keyValue = ""
+    state.saved = false
+    state.editMode = true
   }
 }
 
@@ -95,13 +102,14 @@ const api = {
   load: async () => {
     const { ok, data } = await util.req(api.path, { method: "GET" })
     if (ok) {
-      state.keys = data
+      state.keys = Array.isArray(data) ? data : []
     } else {
       showMessage("error", "Failed to load keys...")
     }
   },
 
   save: async () => {
+    if (state.busy) return
     const name = state.keyName.trim()
     const value = state.keyValue.trim()
 
@@ -113,55 +121,72 @@ const api = {
     const updatedKeys = state.keys.filter(k => k.name !== state.selectedKeyName)
     updatedKeys.push({ name, value })
 
-    const { ok, data } = await util.req(api.path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(updatedKeys)
-    })
+    state.busy = true
+    try {
+      const { ok, data } = await util.req(api.path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(updatedKeys)
+      })
 
-    if (!ok) {
-      showMessage("error", data.error || "Save failed...")
-      return
+      if (!ok) {
+        showMessage("error", data.error || "Save failed...")
+        return
+      }
+
+      state.keys = Array.isArray(data) ? data : []
+      selectKey(name)
+      showMessage("message", "Saved key!")
+    } finally {
+      state.busy = false
     }
-
-    state.keys = data
-    selectKey(name)
-    showMessage("message", "Saved key!")
   },
 
   delete: async (name) => {
+    if (state.busy) return
     const url = `${api.path}?name=${encodeURIComponent(name)}`
-    const { ok, data } = await util.req(url, { method: "DELETE" })
+    state.busy = true
+    try {
+      const { ok, data } = await util.req(url, { method: "DELETE" })
 
-    state.confirmDelete.visible = false;
+      state.confirmDelete.visible = false;
 
-    if (!ok) {
-      showMessage("error", "Delete failed...")
-      return
+      if (!ok) {
+        showMessage("error", "Delete failed...")
+        return
+      }
+
+      state.keys = Array.isArray(data) ? data : []
+      state.keyName = ""
+      state.keyValue = ""
+      state.selectedKeyName = ""
+      showMessage("message", "Deleted key!")
+    } finally {
+      state.busy = false
     }
-
-    state.keys = data
-    state.keyName = ""
-    state.keyValue = ""
-    state.selectedKeyName = ""
-    showMessage("message", "Deleted key!")
   },
 
   applyKey: async (name, value) => {
+    if (state.busy) return
     const payload = { name, value }
 
-    const { ok } = await util.req("/api/tsk_key_set", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    })
+    state.busy = true
+    try {
+      const { ok, data } = await util.req("/api/tsk_key_set", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      })
 
-    if (!ok) {
-      showMessage("error", "Apply failed...")
-      return
+      if (!ok) {
+        showMessage("error", data.error || "Apply failed...")
+        return
+      }
+
+      showMessage("message", "Key applied!")
+    } finally {
+      state.busy = false
     }
-
-    showMessage("message", "Key applied!")
   }
 }
 
@@ -186,7 +211,7 @@ export function TSKManager() {
             @change="${(e) => selectKey(e.target.value)}">
             <option value="">-- Select a saved key --</option>
             ${() => (state.keys || []).map(k => html`
-              <option value="${k.name}">${k.name}</option>
+              <option value="${() => k.name}">${() => k.name}</option>
             `)}
           </select>
         </div>
@@ -222,20 +247,22 @@ export function TSKManager() {
             autocomplete="off"
             value="${() => state.keyValue}"
             @input="${(e) => {
-              state.keyValue = e.target.value.replace(/^\s+/, "")
+              state.keyValue = e.target.value.trim()
               state.saved = false
               state.editMode = true
             }}"
           />
           <button
-            class="${() => `tskkeys-btn ${state.saved ? "delete" : ""} ${!canSave() ? "disabled" : ""}`}"
-            disabled="${() => !canSave()}"
+            class="${() => `tskkeys-btn ${state.saved ? "delete" : ""} ${!canSave() || state.busy ? "disabled" : ""}`}"
+            aria-label="Save key"
+            disabled="${() => !canSave() || state.busy}"
             @click="${() => api.save()}">
             💾
           </button>
           <button
-            class="${() => `tskkeys-btn delete ${!state.selectedKeyName ? "disabled" : ""}`}"
-            disabled="${() => !state.selectedKeyName}"
+            class="${() => `tskkeys-btn delete ${!state.selectedKeyName || state.busy ? "disabled" : ""}`}"
+            aria-label="Delete key"
+            disabled="${() => !state.selectedKeyName || state.busy}"
             @click="${() => {
               state.confirmDelete.visible = true
               state.confirmDelete.keyName = state.selectedKeyName
@@ -247,11 +274,15 @@ export function TSKManager() {
         <div class="tskkeys-status">
           <div
             class="tskkeys-message"
+            role="status"
+            aria-live="polite"
             style="${() => state.message ? `opacity: ${state.visible ? 1 : 0}` : "opacity: 0"}">
             ${() => state.message}
           </div>
           <div
             class="tskkeys-error"
+            role="alert"
+            aria-live="assertive"
             style="${() => state.error ? `opacity: ${state.visible ? 1 : 0}` : "opacity: 0"}">
             ${() => state.error}
           </div>
@@ -259,8 +290,8 @@ export function TSKManager() {
 
         <div class="tskkeys-row tskkeys-apply-wrapper">
           <button
-            class="${() => `tskkeys-btn apply ${!state.selectedKeyName ? "disabled" : ""}`}"
-            disabled="${() => !state.selectedKeyName}"
+            class="${() => `tskkeys-btn apply ${!state.selectedKeyName || state.busy ? "disabled" : ""}`}"
+            disabled="${() => !state.selectedKeyName || state.busy}"
             @click="${() => {
               const selected = state.keys.find(k => k.name === state.selectedKeyName)
               if (selected) {
@@ -277,7 +308,7 @@ export function TSKManager() {
 
     ${() => state.confirmDelete.visible ? Modal({
         title: "Confirm Delete",
-        message: `Are you sure you want to delete the key <strong>${state.confirmDelete.keyName}</strong>?`,
+        message: html`Are you sure you want to delete the key <strong>${() => state.confirmDelete.keyName}</strong>?`,
         onConfirm: () => api.delete(state.confirmDelete.keyName),
         onCancel: () => { state.confirmDelete.visible = false; },
         confirmText: "Yes, Delete"

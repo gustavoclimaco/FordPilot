@@ -53,7 +53,7 @@ class FrogPilotEvents:
 
     acceleration = sm["carControl"].actuators.accel
 
-    if not sm["carState"].gasPressed:
+    if sm["carControl"].longActive:
       self.max_acceleration = max(acceleration, self.max_acceleration)
     else:
       self.max_acceleration = 0
@@ -196,7 +196,7 @@ class FrogPilotEvents:
           self.played_events.add(event_choice)
 
       if "youveGotMail" not in self.played_events and sm["frogpilotCarState"].alwaysOnLateralEnabled and not self.always_on_lateral_enabled_previously:
-        if random.random() < RANDOM_EVENTS_CHANCE:
+        if random.random() < RANDOM_EVENTS_CHANCE / DT_MDL:
           self.events.add(FrogPilotEventName.youveGotMail)
 
           self.random_event_playing = True

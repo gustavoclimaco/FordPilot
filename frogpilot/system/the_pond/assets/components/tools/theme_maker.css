@@ -121,7 +121,7 @@
 .delete-theme-button {
   background: none;
   border: none;
-  color: var(--danger-fg);
+  color: var(--text-color);
   cursor: pointer;
   font-size: 1.2rem;
   padding: 0 0.5rem;
@@ -129,8 +129,7 @@
 }
 
 .delete-theme-button:hover {
-  color: var(--danger-hover-bg);
-  transform: scale(1.2);
+  color: var(--text-color);
 }
 
 .discord-username-input {
@@ -148,7 +147,7 @@
 .download-theme-button {
   background: none;
   border: none;
-  color: var(--color-confirm);
+  color: var(--text-color);
   cursor: pointer;
   font-size: 1.2rem;
   padding: 0 0.5rem;
@@ -156,14 +155,13 @@
 }
 
 .download-theme-button:hover {
-  color: var(--color-confirm-hover);
-  transform: scale(1.2);
+  color: var(--text-color);
 }
 
 .file-clear-button {
   background: none;
   border: none;
-  color: var(--danger-fg);
+  color: var(--text-color);
   cursor: pointer;
   font-size: 1rem;
   padding: 0 0.4rem;
@@ -171,12 +169,11 @@
   transition: color var(--transition-fast), transform 0.2s;
 }
 .file-clear-button:hover {
-  color: var(--danger-hover-bg);
-  transform: scale(1.1);
+  color: var(--text-color);
 }
 
 .file-name-display {
-  color: var(--text-muted);
+  color: var(--text-color);
   flex-grow: 1;
   font-size: 0.9em;
   font-style: italic;
@@ -235,7 +232,9 @@ label.file-upload-button {
 }
 
 .help-icon {
+  appearance: none;
   background-color: var(--main-fg);
+  border: none;
   border-radius: 50%;
   color: var(--text-color);
   cursor: pointer;
@@ -244,6 +243,7 @@ label.file-upload-button {
   height: 1.2em;
   line-height: 1.2em;
   margin-left: 0.5em;
+  padding: 0;
   text-align: center;
   transition: background-color var(--transition-fast), transform var(--transition-fast);
   width: 1.2em;
@@ -378,8 +378,12 @@ label.file-upload-button {
   cursor: pointer;
   flex-grow: 1;
   font-weight: var(--font-weight-demi-bold);
+  min-width: 0;
+  overflow: hidden;
   text-align: left;
+  text-overflow: ellipsis;
   transition: color var(--transition-fast);
+  white-space: nowrap;
 }
 
 .theme-button:hover {
@@ -464,10 +468,6 @@ label.file-upload-button {
   width: 100%;
 }
 
-.theme-maker-main-widget:hover {
-  transform: var(--hover-scale-sm);
-}
-
 .theme-maker-sub-widgets {
   display: flex;
   flex-wrap: wrap;
@@ -493,11 +493,6 @@ label.file-upload-button {
   overflow: visible;
   padding: var(--padding-base);
   transition: box-shadow var(--transition-fast), transform var(--transition-fast);
-}
-
-.theme-maker-widget:hover {
-  box-shadow: var(--shadow-md);
-  transform: var(--hover-scale-sm);
 }
 
 .theme-name-label {
@@ -544,8 +539,6 @@ label.file-upload-button {
 .toggle-button:not(.active):hover {
   background-color: var(--main-fg);
   box-shadow: var(--shadow-md);
-  font-weight: var(--font-weight-demi-bold);
-  transform: var(--hover-scale-sm);
 }
 
 .turn-signal-help-text {
@@ -689,12 +682,33 @@ label.file-upload-button {
   vertical-align: middle;
 }
 
+.seq-move-buttons {
+  display: flex;
+  gap: 0.25rem;
+  margin-left: auto;
+}
+
+.seq-move-btn {
+  background: none;
+  border: none;
+  color: var(--text-color);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0.25rem 0.4rem;
+}
+
+.seq-move-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
 @keyframes modalFadeIn {
   from { opacity: 0; transform: scale(0.95); }
   to { opacity: 1; transform: scale(1); }
 }
 
-@media only screen and (max-width: 768px) and (orientation: portrait) {
+@media only screen and (max-width: 768px) {
   .manage-themes-tabs {
     flex-wrap: wrap;
   }
@@ -715,6 +729,10 @@ label.file-upload-button {
 
   .save-button-wrapper > button {
     flex-basis: calc(50% - 1rem);
+    font-size: var(--font-size-sm);
+    line-height: 1.2;
     margin-bottom: var(--gap-sm);
+    padding: 0.75rem 0.5rem;
+    white-space: normal;
   }
 }

@@ -22,9 +22,9 @@ from openpilot.selfdrive.car.hyundai.hyundaicanfd import CanBus
 from openpilot.selfdrive.car.hyundai.values import CAR as HyundaiCAR, CANFD_CAR, HyundaiFrogPilotFlags
 from openpilot.selfdrive.car.mock.values import CAR as MockCAR
 from openpilot.selfdrive.car.subaru.values import CAR as SubaruCAR, SubaruFlags
-from openpilot.selfdrive.car.toyota.values import CAR as ToyotaCAR, TSS2_CAR, UNSUPPORTED_DSU_CAR, ToyotaFrogPilotFlags
+from openpilot.selfdrive.car.toyota.values import CAR as ToyotaCAR, TSS2_CAR, UNSUPPORTED_DSU_CAR, ToyotaFlags, ToyotaFrogPilotFlags
 from openpilot.selfdrive.car.values import PLATFORMS
-from openpilot.selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, get_friction
+from openpilot.selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX
 from openpilot.selfdrive.controls.lib.events import Events
 from openpilot.selfdrive.controls.lib.vehicle_model import VehicleModel
 from panda import Panda
@@ -167,9 +167,8 @@ class CarInterfaceBase(ABC):
     fp_ret = custom.FrogPilotCarParams.new_message()
 
     platform = PLATFORMS[candidate]
-    fp_ret.fpFlags |= int(platform.config.flags)
 
-    fp_ret.safetyConfigs = [custom.FrogPilotCarParams.SafetyConfig.new_message()]
+    fp_ret.safetyConfigs = [custom.FrogPilotCarParams.SafetyConfig.new_message() for _ in CP.safetyConfigs]
 
     if platform not in MockCAR:
       if platform in ChryslerCAR:
@@ -182,10 +181,10 @@ class CarInterfaceBase(ABC):
 
       elif platform in HondaCAR:
         if candidate == HondaCAR.HONDA_CLARITY:
-          fp_ret.safetyConfigs[0].safetyParam |= Panda.FLAG_HONDA_CLARITY
+          fp_ret.safetyConfigs[-1].safetyParam |= Panda.FLAG_HONDA_CLARITY
 
         if CP.enableGasInterceptor and candidate not in HONDA_BOSCH:
-          fp_ret.safetyConfigs[0].safetyParam |= Panda.FLAG_HONDA_GAS_INTERCEPTOR
+          fp_ret.safetyConfigs[-1].safetyParam |= Panda.FLAG_HONDA_GAS_INTERCEPTOR
 
         fp_ret.canUsePedal = candidate not in HONDA_BOSCH
 
@@ -199,11 +198,11 @@ class CarInterfaceBase(ABC):
           fp_ret.isHDA2 = hda2
 
           if frogpilot_toggles.taco_tune_hacks:
-            fp_ret.safetyConfigs[0].safetyParam |= Panda.FLAG_HYUNDAI_TACO_TUNE_HACK
+            fp_ret.safetyConfigs[-1].safetyParam |= Panda.FLAG_HYUNDAI_TACO_TUNE_HACK
         else:
           if 0x391 in fingerprint[0]:
             fp_ret.fpFlags |= HyundaiFrogPilotFlags.CAN_LFA_BTN.value
-            fp_ret.safetyConfigs[0].safetyParam |= Panda.FLAG_HYUNDAI_LFA_BTN
+            fp_ret.safetyConfigs[-1].safetyParam |= Panda.FLAG_HYUNDAI_LFA_BTN
 
           if 0x53E in fingerprint[2]:
             fp_ret.fpFlags |= HyundaiFrogPilotFlags.LKAS12.value
@@ -213,15 +212,17 @@ class CarInterfaceBase(ABC):
 
       elif platform in SubaruCAR:
         if not (CP.flags & SubaruFlags.GLOBAL_GEN2 or CP.flags & SubaruFlags.HYBRID) and frogpilot_toggles.subaru_sng:
-          fp_ret.safetyConfigs[0].safetyParam |= Panda.FLAG_SUBARU_SNG
+          fp_ret.safetyConfigs[-1].safetyParam |= Panda.FLAG_SUBARU_SNG
 
       elif platform in ToyotaCAR:
-        if candidate == ToyotaCAR.TOYOTA_PRIUS:
-          if 0x23 in fingerprint[0]:
-            fp_ret.fpFlags |= ToyotaFrogPilotFlags.ZSS.value
+        if frogpilot_toggles.toyota_dsu_bypass and not (CP.flags & ToyotaFlags.SMART_DSU.value) and not CP.enableDsu and candidate not in (TSS2_CAR | UNSUPPORTED_DSU_CAR):
+          fp_ret.fpFlags |= ToyotaFrogPilotFlags.DSU_BYPASS.value
+
+        if 0x23 in fingerprint[0]:
+          fp_ret.fpFlags |= ToyotaFrogPilotFlags.ZSS.value
 
         if CP.enableGasInterceptor:
-          fp_ret.safetyConfigs[0].safetyParam |= Panda.FLAG_TOYOTA_GAS_INTERCEPTOR
+          fp_ret.safetyConfigs[-1].safetyParam |= Panda.FLAG_TOYOTA_GAS_INTERCEPTOR
 
         fp_ret.canUsePedal = not CP.autoResumeSng
         fp_ret.canUseSDSU = not CP.enableDsu and candidate not in UNSUPPORTED_DSU_CAR and candidate not in TSS2_CAR

@@ -1,407 +1,334 @@
 #!/usr/bin/env python3
+import csv
 import json
 import math
 import requests
 import time
 
-from collections import OrderedDict, deque
-from datetime import datetime, timedelta, timezone
+from collections import deque
 
 from cereal import log, messaging
 
 from openpilot.common.conversions import Conversions as CV
-from openpilot.frogpilot.common.frogpilot_utilities import calculate_distance_to_point, calculate_lane_width, is_url_pingable
-from openpilot.frogpilot.common.frogpilot_variables import params, params_memory
+from openpilot.frogpilot.common.frogpilot_utilities import calculate_distance_to_point, is_url_pingable
+from openpilot.frogpilot.common.frogpilot_variables import EARTH_RADIUS, params, params_memory
 
-NetworkType = log.DeviceState.NetworkType
+MAX_SPEED_LIMITS = 1_000_000
+SPEED_LIMIT_RECHECK_INTERVAL = 7 * 24 * 60 * 60
 
-BOUNDING_BOX_RADIUS_DEGREE = 0.1
-MAX_ENTRIES = 1_000_000
-MAX_OVERPASS_DATA_BYTES = 1_073_741_824
-MAX_OVERPASS_REQUESTS = 10_000
-METERS_PER_DEG_LAT = 111_320
-VETTING_INTERVAL_DAYS = 7
+MAX_BEARING_DIFFERENCE = 30
+METERS_PER_DEGREE = math.radians(1) * EARTH_RADIUS
 
-OVERPASS_API_URL = "https://overpass-api.de/api/interpreter"
-OVERPASS_STATUS_URL = "https://overpass-api.de/api/status"
+OSM_QUERY_RADIUS = 500
+OSM_SEARCH_RADIUS = 35
+OSM_WAY_ID_BATCH_SIZE = 1_000
 
-class MapSpeedLogger:
-  def __init__(self):
-    self.cached_box = None
-    self.previous_coordinates = None
+OSM_HIGHWAY_TYPES = "living_street|motorway|motorway_link|primary|secondary|tertiary|primary_link|secondary_link|tertiary_link|residential|service|trunk|trunk_link|unclassified"
 
-    self.cached_segments = {}
 
-    self.dataset_additions = deque(maxlen=MAX_ENTRIES)
+def calculate_way_distance(speed_limit, way):
+  latitude = speed_limit["latitude"]
+  longitude = speed_limit["longitude"]
+  bearing = speed_limit["bearing"]
+  tags = way["tags"]
 
-    self.overpass_requests = json.loads(params.get("OverpassRequests") or "{}")
-    self.overpass_requests.setdefault("day", datetime.now(timezone.utc).day)
-    self.overpass_requests.setdefault("total_bytes", 0)
-    self.overpass_requests.setdefault("total_requests", 0)
+  longitude_scale = math.cos(math.radians(latitude))
+  nodes = [((node["lon"] - longitude) * METERS_PER_DEGREE * longitude_scale, (node["lat"] - latitude) * METERS_PER_DEGREE) for node in way.get("geometry") or []]
+  oneway = tags.get("oneway", "")
+  bidirectional = not (
+    oneway in ("-1", "1", "true", "yes")
+    or (oneway not in ("0", "false", "no") and tags.get("highway") in ("motorway", "motorway_link", "trunk_link"))
+    or tags.get("junction") in ("roundabout", "circular")
+  )
 
-    self.session = requests.Session()
-    self.session.headers.update({"Accept-Language": "en"})
-    self.session.headers.update({"User-Agent": "frogpilot-map-speed-logger/1.0 (https://github.com/FrogAi/FrogPilot)"})
+  closest_distance = None
+  for (ax, ay), (bx, by) in zip(nodes, nodes[1:]):
+    delta_x = bx - ax
+    delta_y = by - ay
 
-    self.sm = messaging.SubMaster(["deviceState", "frogpilotCarState", "frogpilotNavigation", "frogpilotPlan", "liveLocationKalman", "modelV2"])
+    length_squared = delta_x * delta_x + delta_y * delta_y
+    segment_bearing = (math.degrees(math.atan2(delta_x, delta_y)) + 360) % 360
+    if oneway == "-1":
+      segment_bearing = (segment_bearing + 180) % 360
 
-  @property
-  def can_make_overpass_request(self):
-    return self.overpass_requests["total_bytes"] < MAX_OVERPASS_DATA_BYTES and self.overpass_requests["total_requests"] < MAX_OVERPASS_REQUESTS
+    bearing_difference = abs((bearing - segment_bearing + 180) % 360 - 180)
+    if bidirectional:
+      bearing_difference = min(bearing_difference, 180 - bearing_difference)
 
-  @property
-  def should_stop_processing(self):
-    return self.sm["deviceState"].started or not params_memory.get_bool("UpdateSpeedLimits")
+    if not length_squared or bearing_difference > MAX_BEARING_DIFFERENCE:
+      continue
 
-  @staticmethod
-  def cleanup_dataset(dataset):
-    cleaned_data = OrderedDict()
+    segment_fraction = min(1, max(0, -(ax * delta_x + ay * delta_y) / length_squared))
+    distance = math.hypot(ax + segment_fraction * delta_x, ay + segment_fraction * delta_y)
 
-    for item in dataset:
-      if "last_vetted" in item:
-        required = {"incorrect_limit", "last_vetted", "segment_id", "source", "speed_limit", "start_coordinates"}
-      else:
-        required = {"bearing", "end_coordinates", "incorrect_limit", "road_name", "road_width", "source", "speed_limit", "start_coordinates"}
+    if closest_distance is None or distance < closest_distance:
+      closest_distance = distance
 
-      if not required.issubset(item.keys()):
-        continue
+  return closest_distance
 
-      entry_copy = item.copy()
-      entry_copy.pop("last_vetted", None)
 
-      key = json.dumps(entry_copy, sort_keys=True)
-      cleaned_data[key] = item
+def filtered_speed_limit_record(osm_way_id=0, speed_limit=0, last_checked=0):
+  return {
+    "last_checked": last_checked,
+    "osm_way_id": osm_way_id,
+    "speed_limit": speed_limit,
+  }
 
-    return deque(cleaned_data.values(), maxlen=MAX_ENTRIES)
 
-  @staticmethod
-  def meters_to_deg_lat(meters):
-    return meters / METERS_PER_DEG_LAT
+def find_matching_way(speed_limit, ways):
+  closest_way = None
+  for way in ways:
+    tags = way["tags"]
+    if speed_limit["road_name"] not in (tags.get("name"), tags.get("ref")):
+      continue
 
-  @staticmethod
-  def meters_to_deg_lon(meters, latitude):
-    return meters / (METERS_PER_DEG_LAT * math.cos(latitude * CV.DEG_TO_RAD))
+    distance = calculate_way_distance(speed_limit, way)
+    if distance is None or distance > OSM_SEARCH_RADIUS:
+      continue
 
-  def get_speed_limit_source(self):
-    sources = [
-      (self.sm["frogpilotNavigation"].navigationSpeedLimit, "NOO"),
-      (self.sm["frogpilotPlan"].slcMapboxSpeedLimit, "Mapbox"),
-      (self.sm["frogpilotCarState"].dashboardSpeedLimit, "Dashboard"),
-    ]
-    for speed_limit, source in sources:
-      if speed_limit > 0:
-        return speed_limit, source
+    if closest_way is None or distance < closest_way[0]:
+      closest_way = distance, way
+
+  return closest_way[1] if closest_way else None
+
+
+def find_osm_way(speed_limit, session, overpass_cache=None):
+  query_radius = OSM_QUERY_RADIUS if overpass_cache is not None else OSM_SEARCH_RADIUS
+  if overpass_cache is not None:
+    cached_queries = overpass_cache.setdefault(speed_limit["road_name"], [])
+    for latitude, longitude, elements in cached_queries:
+      if calculate_distance_to_point(latitude, longitude, speed_limit["latitude"], speed_limit["longitude"]) <= query_radius - OSM_SEARCH_RADIUS:
+        return find_matching_way(speed_limit, elements)
+
+  road_name = json.dumps(speed_limit["road_name"])
+  way_query = f"way(around:{query_radius},{speed_limit['latitude']},{speed_limit['longitude']})[highway~\"^({OSM_HIGHWAY_TYPES})$\"]"
+  query = f"[out:json][timeout:10];({way_query}[name={road_name}];{way_query}[ref={road_name}];);out tags geom;"
+
+  response = overpass_response(query, session)
+  if response is None:
     return None
 
-  def is_in_cached_box(self, latitude, longitude):
-    if self.cached_box is None:
-      return False
-    return self.cached_box["min_latitude"] <= latitude <= self.cached_box["max_latitude"] and \
-           self.cached_box["min_longitude"] <= longitude <= self.cached_box["max_longitude"]
+  try:
+    data = response.json()
+  except ValueError:
+    return None
 
-  def record_overpass_request(self, content_bytes):
-    self.overpass_requests["total_bytes"] += content_bytes
-    self.overpass_requests["total_requests"] += 1
+  if data.get("remark"):
+    return None
 
-  def reset_daily_api_limits(self):
-    current_day = datetime.now(timezone.utc).day
-    if current_day != self.overpass_requests["day"]:
-      self.overpass_requests.update({
-        "day": current_day,
-        "total_requests": 0,
-        "total_bytes": 0,
-      })
+  elements = data.get("elements", [])
+  if overpass_cache is not None:
+    cached_queries.append((speed_limit["latitude"], speed_limit["longitude"], elements))
+  return find_matching_way(speed_limit, elements)
 
-  def update_params(self, dataset, filtered_dataset):
-    params.put("OverpassRequests", json.dumps(self.overpass_requests))
-    params.put("SpeedLimits", json.dumps(list(dataset)))
-    params.put("SpeedLimitsFiltered", json.dumps(list(filtered_dataset)))
 
-  def wait_for_api(self):
-    while not is_url_pingable(OVERPASS_STATUS_URL):
-      print("Waiting for Overpass API to be available...")
-      self.sm.update()
+def load_records(raw, keys):
+  try:
+    records = json.loads(raw or "[]")
+  except (TypeError, ValueError):
+    return []
+  if not isinstance(records, list):
+    return []
+  return [record for record in records if isinstance(record, dict) and keys.issubset(record)]
 
-      if self.should_stop_processing:
-        return False
 
-      time.sleep(5)
+def maxspeed_matches(speed_limit, maxspeed):
+  maxspeed = (maxspeed or "").split()
+  if not maxspeed:
+    return False
+
+  if not maxspeed[0].isdecimal():
     return True
 
-  def fetch_from_overpass(self, latitude, longitude):
-    min_lat = latitude - BOUNDING_BOX_RADIUS_DEGREE
-    max_lat = latitude + BOUNDING_BOX_RADIUS_DEGREE
-    min_lon = longitude - BOUNDING_BOX_RADIUS_DEGREE
-    max_lon = longitude + BOUNDING_BOX_RADIUS_DEGREE
+  conversion = CV.MS_TO_MPH if maxspeed[-1] == "mph" else CV.MS_TO_KPH
+  return round(speed_limit * conversion) == int(maxspeed[0])
 
-    self.cached_box = {"min_latitude": min_lat, "max_latitude": max_lat, "min_longitude": min_lon, "max_longitude": max_lon}
-    self.cached_segments.clear()
 
-    query = (
-      f"[out:json][timeout:90][maxsize:{MAX_OVERPASS_DATA_BYTES // 10}];"
-      f"way({min_lat:.5f},{min_lon:.5f},{max_lat:.5f},{max_lon:.5f})"
-      "[highway~'^(motorway|motorway_link|primary|primary_link|residential|"
-      "secondary|secondary_link|tertiary|tertiary_link|trunk|trunk_link)$'];"
-      "out geom qt;"
+def overpass_response(query, session):
+  try:
+    response = session.post(
+      "https://overpass-api.de/api/interpreter",
+      data={"data": query},
+      timeout=10,
     )
+    response.raise_for_status()
+    return response
+  except requests.RequestException:
+    return None
 
-    try:
-      response = self.session.post(OVERPASS_API_URL, data=query, timeout=90)
-      self.record_overpass_request(len(response.content))
 
-      if response.status_code == 429:
-        retry_after = int(response.headers.get("Retry-After", 10))
-        print(f"Overpass API rate limit hit. Retrying in {retry_after} seconds.")
+def remove_fixed_speed_limits(speed_limits, session, now):
+  osm_way_ids = [
+    osm_way_id for osm_way_id, speed_limit in speed_limits.items()
+    if now - speed_limit["last_checked"] >= SPEED_LIMIT_RECHECK_INTERVAL
+  ]
 
-        time.sleep(retry_after)
+  for index in range(0, len(osm_way_ids), OSM_WAY_ID_BATCH_SIZE):
+    osm_way_id_batch = osm_way_ids[index:index + OSM_WAY_ID_BATCH_SIZE]
+    query = f"[out:csv(::id,maxspeed,'maxspeed:forward','maxspeed:backward';false)][timeout:10];way(id:{','.join(map(str, osm_way_id_batch))});out;"
+    response = overpass_response(query, session)
+    if response is None:
+      continue
 
-        response = self.session.post(OVERPASS_API_URL, data=query, timeout=90)
-        self.record_overpass_request(len(response.content))
+    for osm_way_id in osm_way_id_batch:
+      speed_limits[osm_way_id]["last_checked"] = now
 
-      response.raise_for_status()
-      return response.json().get("elements", [])
-    except requests.exceptions.RequestException as exception:
-      print(f"Overpass API request failed: {exception}")
-      self.cached_segments.clear()
-      return []
-
-  def filter_segments_for_entry(self, entry):
-    bearing_rad = entry["bearing"] * CV.DEG_TO_RAD
-    start_lat, start_lon = entry["start_coordinates"]["latitude"], entry["start_coordinates"]["longitude"]
-    end_lat, end_lon = entry["end_coordinates"]["latitude"], entry["end_coordinates"]["longitude"]
-    mid_lat = (start_lat + end_lat) / 2
-
-    forward_buffer_lat = self.meters_to_deg_lat(entry["speed_limit"])
-    forward_buffer_lon = self.meters_to_deg_lon(entry["speed_limit"], mid_lat)
-    side_buffer_lat = self.meters_to_deg_lat(entry["road_width"])
-    side_buffer_lon = self.meters_to_deg_lon(entry["road_width"], mid_lat)
-
-    delta_lat_fwd = forward_buffer_lat * math.cos(bearing_rad)
-    delta_lon_fwd = forward_buffer_lon * math.sin(bearing_rad)
-    delta_lat_side = side_buffer_lat * math.cos(bearing_rad + math.pi / 2)
-    delta_lon_side = side_buffer_lon * math.sin(bearing_rad + math.pi / 2)
-
-    min_lat = min(start_lat, end_lat) - abs(delta_lat_fwd) - abs(delta_lat_side)
-    max_lat = max(start_lat, end_lat) + abs(delta_lat_fwd) + abs(delta_lat_side)
-    min_lon = min(start_lon, end_lon) - abs(delta_lon_fwd) - abs(delta_lon_side)
-    max_lon = max(start_lon, end_lon) + abs(delta_lon_fwd) + abs(delta_lon_side)
-
-    relevant_segments = []
-    for segment in self.cached_segments.values():
-      if not segment or "nodes" not in segment:
+    for row in csv.reader(response.text.splitlines(), delimiter="\t"):
+      if not row or not row[0].isdigit():
         continue
 
-      latitudes = [node[0] for node in segment["nodes"]]
-      longitudes = [node[1] for node in segment["nodes"]]
+      maxspeeds = row[1:]
+      osm_way_id = int(row[0])
+      speed_limit = speed_limits.get(osm_way_id, {}).get("speed_limit")
 
-      if not (max(latitudes) < min_lat or min(latitudes) > max_lat or max(longitudes) < min_lon or min(longitudes) > max_lon):
-        relevant_segments.append(segment)
+      if speed_limit is not None and any(maxspeed_matches(speed_limit, maxspeed) for maxspeed in maxspeeds):
+        del speed_limits[osm_way_id]
 
-    return relevant_segments
+
+def speed_limit_record(bearing=0, latitude=0, longitude=0, road_name="", speed_limit=0):
+  return {
+    "bearing": bearing,
+    "latitude": latitude,
+    "longitude": longitude,
+    "road_name": road_name,
+    "speed_limit": speed_limit,
+  }
+
+
+def speed_limit_records(speed_limits_by_way_id):
+  records = []
+  for osm_way_id, speed_limit in speed_limits_by_way_id.items():
+    if speed_limit["speed_limit"] is not None:
+      records.append(filtered_speed_limit_record(osm_way_id, **speed_limit))
+  return records
+
+
+def speed_limits_match(speed_limit1, speed_limit2):
+  return abs(speed_limit1 - speed_limit2) < 1
+
+
+class SpeedLimitFiller:
+  def __init__(self):
+    self.filtered_previously = False
+    self.started_previously = False
+
+    self.sm = messaging.SubMaster(["deviceState", "frogpilotCarState", "frogpilotNavigation", "frogpilotPlan", "liveLocationKalman"], poll="liveLocationKalman")
+
+  def filter_speed_limits(self):
+    now = int(time.time())
+
+    speed_limits = load_records(params.get("SpeedLimits"), set(speed_limit_record()))
+    speed_limits_filtered = load_records(params.get("SpeedLimitsFiltered"), set(filtered_speed_limit_record()) - {"last_checked"})
+
+    filtered_speed_limits = {
+      speed_limit["osm_way_id"]: {
+        "last_checked": speed_limit.get("last_checked", 0),
+        "speed_limit": speed_limit["speed_limit"],
+      }
+      for speed_limit in speed_limits_filtered
+    }
+
+    overpass_cache = {}
+    unfiltered_speed_limits = []
+    with requests.Session() as session:
+      session.headers.update({"User-Agent": "FrogPilot-SpeedLimitFiller/1.0"})
+
+      remove_fixed_speed_limits(filtered_speed_limits, session, now)
+
+      for index, speed_limit in enumerate(speed_limits):
+        self.sm.update(0)
+
+        if self.sm["deviceState"].started:
+          unfiltered_speed_limits.extend(speed_limits[index:])
+          break
+
+        osm_way = find_osm_way(speed_limit, session, overpass_cache)
+        if osm_way is None:
+          unfiltered_speed_limits.append(speed_limit)
+          continue
+
+        source_speed_limit = speed_limit["speed_limit"]
+        matching_maxspeed_exists = any(maxspeed_matches(source_speed_limit, osm_way["tags"].get(tag)) for tag in ("maxspeed", "maxspeed:backward", "maxspeed:forward"))
+        if matching_maxspeed_exists:
+          continue
+
+        osm_way_id = osm_way["id"]
+        existing_speed_limit = filtered_speed_limits.get(osm_way_id)
+        if existing_speed_limit is None:
+          filtered_speed_limits[osm_way_id] = {"last_checked": now, "speed_limit": source_speed_limit}
+        elif (existing_speed_limit["speed_limit"] is not None and not speed_limits_match(existing_speed_limit["speed_limit"], source_speed_limit)):
+          existing_speed_limit["speed_limit"] = None
+
+    params.put("SpeedLimits", json.dumps(unfiltered_speed_limits))
+    params.put("SpeedLimitsFiltered", json.dumps(speed_limit_records(filtered_speed_limits)))
 
   def log_speed_limit(self):
-    if not self.sm.updated["liveLocationKalman"]:
+    source_speed_limit = next(
+      (speed_limit for speed_limit in (
+        self.sm["frogpilotCarState"].dashboardSpeedLimit,
+        self.sm["frogpilotPlan"].slcMapboxSpeedLimit,
+        self.sm["frogpilotNavigation"].navigationSpeedLimit,
+      ) if speed_limit >= 1),
+      0,
+    )
+    if source_speed_limit < 1:
       return
 
-    localizer_valid = self.sm["liveLocationKalman"].status == log.LiveLocationKalman.Status.valid and self.sm["liveLocationKalman"].positionGeodetic.valid
-    if not (self.sm["liveLocationKalman"].gpsOK and localizer_valid):
-      self.previous_coordinates = None
+    location = self.sm["liveLocationKalman"]
+    if not location.gpsOK or location.status != log.LiveLocationKalman.Status.valid or not location.positionGeodetic.valid:
       return
 
-    current_latitude = self.sm["liveLocationKalman"].positionGeodetic.value[0]
-    current_longitude = self.sm["liveLocationKalman"].positionGeodetic.value[1]
+    bearing = math.degrees(location.calibratedOrientationNED.value[2])
+    latitude, longitude = location.positionGeodetic.value[0], location.positionGeodetic.value[1]
 
-    if self.previous_coordinates is None:
-      self.previous_coordinates = {"latitude": current_latitude, "longitude": current_longitude}
-      return
-
-    current_speed_source = self.get_speed_limit_source()
-    valid_sources = {source[0] for source in [current_speed_source] if source and source[0] > 0}
-
-    map_speed = params_memory.get_float("MapSpeedLimit")
-    is_incorrect_limit = bool(map_speed > 0 and valid_sources and all(abs(map_speed - source) > 1 for source in valid_sources))
-
-    if map_speed > 0 and not is_incorrect_limit:
-      self.previous_coordinates = None
+    if self.logged_position is not None and calculate_distance_to_point(*self.logged_position, latitude, longitude) < 1:
       return
 
     road_name = params_memory.get("RoadName", encoding="utf-8")
-    if not road_name or not current_speed_source:
+    if not road_name:
       return
 
-    distance = calculate_distance_to_point(
-      self.previous_coordinates["latitude"] * CV.DEG_TO_RAD,
-      self.previous_coordinates["longitude"] * CV.DEG_TO_RAD,
-      current_latitude * CV.DEG_TO_RAD,
-      current_longitude * CV.DEG_TO_RAD
-    )
-    if distance < 1:
+    map_speed_limit = params_memory.get_float("MapSpeedLimit")
+    if map_speed_limit >= 1 and speed_limits_match(map_speed_limit, source_speed_limit):
       return
 
-    speed_limit, source = current_speed_source
-    self.dataset_additions.append({
-      "bearing": math.degrees(self.sm["liveLocationKalman"].calibratedOrientationNED.value[2]),
-      "end_coordinates": {"latitude": current_latitude, "longitude": current_longitude},
-      "incorrect_limit": is_incorrect_limit,
-      "road_name": road_name,
-      "road_width": calculate_lane_width(self.sm["modelV2"].laneLines[1], self.sm["modelV2"].laneLines[2]),
-      "source": source,
-      "speed_limit": speed_limit,
-      "start_coordinates": self.previous_coordinates,
-    })
+    self.new_speed_limits.append(speed_limit_record(bearing, latitude, longitude, road_name, source_speed_limit))
 
-    self.previous_coordinates = {"latitude": current_latitude, "longitude": current_longitude}
+    self.logged_position = (latitude, longitude)
 
-  def process_new_entries(self, dataset, filtered_dataset):
-    existing_segment_ids = {entry["segment_id"] for entry in filtered_dataset if "segment_id" in entry}
-    entries_to_process = list(dataset)
-    total_entries = len(entries_to_process)
+  def update(self):
+    self.sm.update()
 
-    for i, entry in enumerate(entries_to_process):
-      self.sm.update()
+    started = self.sm["deviceState"].started
 
-      if self.should_stop_processing:
-        break
+    if started and not self.started_previously:
+      self.new_speed_limits = deque(maxlen=MAX_SPEED_LIMITS)
 
-      if not self.can_make_overpass_request:
-        params_memory.put("UpdateSpeedLimitsStatus", "Hit API limit...")
-        time.sleep(5)
-        break
+      self.logged_position = None
+    elif started and self.sm.updated["liveLocationKalman"]:
+      self.log_speed_limit()
+    elif not started and self.started_previously:
+      if self.new_speed_limits:
+        speed_limits = deque(load_records(params.get("SpeedLimits"), set(speed_limit_record())), maxlen=MAX_SPEED_LIMITS)
+        speed_limits.extend(self.new_speed_limits)
+        params.put("SpeedLimits", json.dumps(list(speed_limits)))
 
-      params_memory.put("UpdateSpeedLimitsStatus", f"Processing: {i + 1} / {total_entries}")
+      self.filtered_previously = False
+    elif not started and not self.filtered_previously:
+      if is_url_pingable("https://overpass-api.de/api/status"):
+        self.filter_speed_limits()
 
-      start_coords = entry["start_coordinates"]
-      self.update_cached_segments(start_coords["latitude"], start_coords["longitude"])
-      segments = self.filter_segments_for_entry(entry)
+        self.filtered_previously = True
 
-      dataset.remove(entry)
+    self.started_previously = started
 
-      for segment in segments:
-        segment_id = segment["segment_id"]
-        if segment_id in existing_segment_ids:
-          continue
-        if segment["maxspeed"] and not entry.get("incorrect_limit"):
-          continue
-        if segment["road_name"] != entry.get("road_name"):
-          continue
-
-        filtered_dataset.append({
-          "incorrect_limit": entry.get("incorrect_limit"),
-          "last_vetted": datetime.now(timezone.utc).isoformat(),
-          "segment_id": segment_id,
-          "source": entry["source"],
-          "speed_limit": entry["speed_limit"],
-          "start_coordinates": entry["start_coordinates"],
-        })
-        existing_segment_ids.add(segment_id)
-
-      if i % 100 == 0:
-        self.update_params(dataset, filtered_dataset)
-
-  def process_speed_limits(self):
-    self.reset_daily_api_limits()
-
-    if not self.wait_for_api():
-      return
-
-    self.cached_box, self.cached_segments = None, {}
-
-    dataset = self.cleanup_dataset(json.loads(params.get("SpeedLimits") or "[]"))
-    filtered_dataset = self.cleanup_dataset(json.loads(params.get("SpeedLimitsFiltered") or "[]"))
-
-    filtered_dataset = self.vet_entries(filtered_dataset)
-    self.update_params(dataset, filtered_dataset)
-
-    if dataset and not self.should_stop_processing:
-      self.cached_box, self.cached_segments = None, {}
-      params_memory.put("UpdateSpeedLimitsStatus", "Calculating...")
-      self.process_new_entries(dataset, filtered_dataset)
-
-    self.update_params(dataset, filtered_dataset)
-    params_memory.put("UpdateSpeedLimitsStatus", "Completed!")
-
-  def update_cached_segments(self, latitude, longitude, vetting=False):
-    if not self.is_in_cached_box(latitude, longitude):
-      elements = self.fetch_from_overpass(latitude, longitude)
-      for way in elements:
-        if way.get("type") == "way" and (segment_id := way.get("id")):
-          tags = way.get("tags", {})
-          if vetting:
-            self.cached_segments[segment_id] = tags.get("maxspeed")
-          elif "geometry" in way and (nodes := way["geometry"]):
-            self.cached_segments[segment_id] = {
-              "maxspeed": tags.get("maxspeed"),
-              "nodes": [(node["lat"], node["lon"]) for node in nodes],
-              "road_name": tags.get("name"),
-              "segment_id": segment_id,
-            }
-
-  def vet_entries(self, filtered_dataset):
-    dataset_list = list(filtered_dataset)
-    total_to_vet = len(filtered_dataset)
-    vetted_entries = deque(maxlen=MAX_ENTRIES)
-
-    for i, entry in enumerate(dataset_list):
-      self.sm.update()
-
-      if self.should_stop_processing:
-        vetted_entries.extend(dataset_list[i:])
-        break
-
-      if not self.can_make_overpass_request:
-        params_memory.put("UpdateSpeedLimitsStatus", "Hit API limit...")
-        time.sleep(5)
-        vetted_entries.extend(dataset_list[i:])
-        break
-
-      params_memory.put("UpdateSpeedLimitsStatus", f"Vetting: {i + 1} / {total_to_vet}")
-
-      last_vetted_time = datetime.fromisoformat(entry["last_vetted"])
-      if datetime.now(timezone.utc) - last_vetted_time < timedelta(days=VETTING_INTERVAL_DAYS):
-        vetted_entries.append(entry)
-        continue
-
-      start_coords = entry["start_coordinates"]
-      self.update_cached_segments(start_coords["latitude"], start_coords["longitude"], vetting=True)
-
-      current_maxspeed = self.cached_segments.get(entry["segment_id"])
-      if current_maxspeed is None or (entry.get("incorrect_limit") and current_maxspeed != entry.get("speed_limit")):
-        entry["last_vetted"] = datetime.now(timezone.utc).isoformat()
-        vetted_entries.append(entry)
-
-    return self.cleanup_dataset(list(vetted_entries))
 
 def main():
-  logger = MapSpeedLogger()
-
-  previously_started = False
+  speed_limit_filler = SpeedLimitFiller()
 
   while True:
-    logger.sm.update()
+    speed_limit_filler.update()
 
-    if logger.sm["deviceState"].started:
-      logger.log_speed_limit()
-
-      previously_started = True
-    elif previously_started:
-      existing_dataset = json.loads(params.get("SpeedLimits") or "[]")
-      existing_dataset.extend(logger.dataset_additions)
-
-      new_dataset = logger.cleanup_dataset(existing_dataset)
-      params.put("SpeedLimits", json.dumps(list(new_dataset)))
-
-      if logger.sm["deviceState"].networkType in (NetworkType.ethernet, NetworkType.wifi):
-        params_memory.put_bool("UpdateSpeedLimits", True)
-
-      logger.dataset_additions.clear()
-
-      previously_started = False
-    elif params_memory.get_bool("UpdateSpeedLimits"):
-      logger.process_speed_limits()
-
-      params_memory.remove("UpdateSpeedLimits")
-    else:
-      time.sleep(5)
 
 if __name__ == "__main__":
   main()
