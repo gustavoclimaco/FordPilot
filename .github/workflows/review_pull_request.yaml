@@ -11,44 +11,38 @@ permissions:
   pull-requests: write
 
 env:
-  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-concurrency:
-  cancel-in-progress: true
-  group: review-pull-request-${{ github.event.pull_request.number }}
+  BRANCH_PR_TARGET: ${{ vars.BRANCH_PR_TARGET }}
+  GH_TOKEN: ${{ github.token }}
 
 jobs:
-  reject_wrong_target:
-    name: "Close PRs that target the wrong branch"
+  redirect:
     if: >-
       ${{
-        github.event.pull_request.base.ref != (vars.BRANCH_PR_TARGET || 'MAKE-PRS-HERE') &&
+        github.repository == 'FrogAi/FrogPilot' &&
+        github.event.pull_request.base.ref != vars.BRANCH_PR_TARGET &&
         github.event.pull_request.user.login != 'FrogAi' &&
         (github.event.action != 'reopened' || github.actor != 'FrogAi')
       }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
     steps:
-      - name: "Comment and close pull request"
-        run: |
-          gh pr close "${{ github.event.pull_request.number }}" \
-            --comment "Please submit your pull request to the \"${{ vars.BRANCH_PR_TARGET || 'MAKE-PRS-HERE' }}\" branch." \
-            --repo "${{ github.repository }}"
+      - run: |
+          : "${BRANCH_PR_TARGET:?BRANCH_PR_TARGET is required}"
 
-  welcome_valid_pull_request:
-    name: "Welcome valid PRs"
+          gh pr close ${{ github.event.pull_request.number }} \
+            --repo ${{ github.repository }} \
+            --comment "Thanks for contributing! Pull requests need to target the \"$BRANCH_PR_TARGET\" branch, so this one was closed automatically. Please open a new pull request against \"$BRANCH_PR_TARGET\"."
+
+  welcome:
     if: >-
       ${{
-        github.event.pull_request.user.login != 'FrogAi' &&
-        github.event.pull_request.base.ref == (vars.BRANCH_PR_TARGET || 'MAKE-PRS-HERE')
+        github.event.action == 'opened' &&
+        github.event.pull_request.base.ref == vars.BRANCH_PR_TARGET &&
+        github.event.pull_request.user.login != 'FrogAi'
       }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
     steps:
-      - name: "Leave welcome comment"
-        run: |
-          gh pr comment "${{ github.event.pull_request.number }}" \
-            --body "Thank you for your PR! If you're not already in the FrogPilot Discord, [feel free to join](https://discord.FrogPilot.com) and let me know you've opened a PR!" \
-            --create-if-none \
-            --edit-last \
-            --repo "${{ github.repository }}"
+      - run: >
+          gh pr comment ${{ github.event.pull_request.number }}
+          --repo ${{ github.repository }}
+          --body 'Thanks for contributing! A maintainer will review your pull
+          request soon.'
