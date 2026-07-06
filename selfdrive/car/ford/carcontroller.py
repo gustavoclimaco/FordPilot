@@ -111,7 +111,7 @@ class CarController(CarControllerBase):
       send_ui = True
     if (self.frame % CarControllerParams.ACC_UI_STEP) == 0 or send_ui:
       can_sends.append(fordcan.create_acc_ui_msg(self.packer, self.CAN, self.CP, main_on, CC.latActive,
-                                                 fcw_alert, CS.out.cruiseState.standstill, hud_control,
+                                                 fcw_alert, CS.acc_stop_mode_active, hud_control,
                                                  CS.acc_tja_status_stock_values))
 
     self.main_on_last = main_on

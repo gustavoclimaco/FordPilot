@@ -1,5 +1,4 @@
 from cereal import car, custom
-from opendbc.can.can_define import CANDefine
 from opendbc.can.parser import CANParser
 from openpilot.common.conversions import Conversions as CV
 from openpilot.selfdrive.car.ford.fordcan import CanBus
@@ -7,7 +6,6 @@ from openpilot.selfdrive.car.ford.values import DBC, CarControllerParams, FordFl
 from openpilot.selfdrive.car.interfaces import CarStateBase
 
 GearShifter = car.CarState.GearShifter
-TransmissionType = car.CarParams.TransmissionType
 
 
 # Traffic signals for Speed Limit Controller
@@ -26,14 +24,9 @@ def calculate_speed_limit(cp_cam):
 class CarState(CarStateBase):
   def __init__(self, CP, FPCP):
     super().__init__(CP, FPCP)
-    can_define = CANDefine(DBC[CP.carFingerprint]["pt"])
-    if CP.transmissionType == TransmissionType.automatic:
-      if CP.flags & FordFlags.ALT_STEER_ANGLE:
-        self.shifter_values = can_define.dv["TransGearData"]["GearLvrPos_D_Actl"]
-      else:
-        self.shifter_values = can_define.dv["Gear_Shift_by_Wire_FD1"]["TrnRng_D_RqGsm"]
 
     self.vehicle_sensors_valid = False
+    self.acc_stop_mode_active = False
 
     self.prev_distance_button = 0
     self.distance_button = 0
@@ -93,25 +86,26 @@ class CarState(CarStateBase):
     ret.cruiseState.enabled = cp.vl["EngBrakeData"]["CcStat_D_Actl"] in (4, 5)
     ret.cruiseState.available = cp.vl["EngBrakeData"]["CcStat_D_Actl"] in (3, 4, 5)
     ret.cruiseState.nonAdaptive = cp.vl["Cluster_Info1_FD1"]["AccEnbl_B_RqDrv"] == 0
-    ret.cruiseState.standstill = cp.vl["EngBrakeData"]["AccStopMde_D_Rq"] == 3
+    # AccStopMde_D_Rq==3 ("Stop_Mode_Active") is reported by the vehicle's own ABS/ESC module,
+    # not requested by us. On some retrofit setups (e.g. non-factory-matched PCM/ABS hardware)
+    # it can latch indefinitely once the car comes to a stop and never clear, which permanently
+    # blocks LongControl's stopping->starting transition (see cruise_standstill gate in
+    # selfdrive/controls/lib/longcontrol.py) even though openpilot owns longitudinal control and
+    # is the one deciding when to move. Only honor it when the stock ACC owns longitudinal control.
+    self.acc_stop_mode_active = cp.vl["EngBrakeData"]["AccStopMde_D_Rq"] == 3
+    ret.cruiseState.standstill = self.acc_stop_mode_active and not self.CP.openpilotLongitudinalControl
     ret.accFaulted = cp.vl["EngBrakeData"]["CcStat_D_Actl"] in (1, 2)
     if not self.CP.openpilotLongitudinalControl:
       ret.accFaulted = ret.accFaulted or cp_cam.vl["ACCDATA"]["CmbbDeny_B_Actl"] == 1
 
     # gear
-    ret.gearShifter = GearShifter.drive
-   # if self.CP.transmissionType == TransmissionType.automatic:
-    #  if self.CP.flags & FordFlags.ALT_STEER_ANGLE:
-     #   gear = self.shifter_values.get(cp.vl["TransGearData"]["GearLvrPos_D_Actl"])
-      #else:
-      #  gear = self.shifter_values.get(cp.vl["Gear_Shift_by_Wire_FD1"]["TrnRng_D_RqGsm"])
-      #ret.gearShifter = self.parse_gear_shifter(gear)
-    #elif self.CP.transmissionType == TransmissionType.manual:
-    #  ret.clutchPressed = cp.vl["Engine_Clutch_Data"]["CluPdlPos_Pc_Meas"] > 0
-    #  if bool(cp.vl["BCM_Lamp_Stat_FD1"]["RvrseLghtOn_B_Stat"]):
-    #    ret.gearShifter = GearShifter.reverse
-    #  else:
-    #    ret.gearShifter = GearShifter.drive
+    # The gear lever signal differs by shifter hardware (rotary dial vs. conventional column
+    # shifter) even within the same platform flag (e.g. FORD_EDGE_MK2 covers both a real Edge
+    # with a rotary dial and a Fusion Hybrid retrofit with a conventional shifter), so we can't
+    # rely on TransGearData/Gear_Shift_by_Wire_FD1 generically. The reverse light status is
+    # driven by the BCM off the actual gear state and is the same signal regardless of shifter
+    # hardware, so use it for the only gear state we need: reverse.
+    ret.gearShifter = GearShifter.reverse if bool(cp.vl["BCM_Lamp_Stat_FD1"]["RvrseLghtOn_B_Stat"]) else GearShifter.drive
 
     # safety
     ret.stockFcw = bool(cp_cam.vl["ACCDATA_3"]["FcwVisblWarn_B_Rq"])
@@ -167,13 +161,13 @@ class CarState(CarStateBase):
       ("Steering_Data_FD1", 10),
       ("BodyInfo_3_FD1", 2),
       ("RCMStatusMessage2_FD1", 10),
+      ("BCM_Lamp_Stat_FD1", 1),
     ]
 
     if CP.flags & FordFlags.ALT_STEER_ANGLE:
       messages += [
         ("ParkAid_Data", 50),
         ("SteeringPinion_Data_Alt", 100),
-        ("TransGearData", 10),
       ]
     else:
       messages += [
@@ -188,16 +182,6 @@ class CarState(CarStateBase):
       messages += [
         ("INSTRUMENT_PANEL", 1),
       ]
-
- #   if CP.transmissionType == TransmissionType.automatic:
- #     messages += [
- #       ("Gear_Shift_by_Wire_FD1", 10),
- #     ]
- #  elif CP.transmissionType == TransmissionType.manual:
- #     messages += [
- #       ("Engine_Clutch_Data", 33),
- #      ("BCM_Lamp_Stat_FD1", 1),
- #    ]
 
     if CP.enableBsm and not (CP.flags & FordFlags.CANFD):
       messages += [
