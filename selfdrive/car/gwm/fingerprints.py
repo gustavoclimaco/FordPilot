@@ -1,0 +1,12 @@
+﻿from cereal import car
+from openpilot.selfdrive.car.gwm.values import CAR
+
+Ecu = car.CarParams.Ecu
+
+FW_VERSIONS = {
+  CAR.GWM_HAVAL_H6: {
+    (Ecu.engine, 0x7e0, None): [
+      b'\xf1\x873612100XEC56000\xf1\x89S013A01XKN17002',
+    ],
+  },
+}

@@ -1,4 +1,4 @@
-# python library to interface with panda
+﻿# python library to interface with panda
 import os
 import sys
 import time
@@ -142,6 +142,7 @@ class Panda:
   SAFETY_FAW = 26
   SAFETY_BODY = 27
   SAFETY_HYUNDAI_CANFD = 28
+  SAFETY_GWM = 32
 
   SERIAL_DEBUG = 0
   SERIAL_ESP = 1

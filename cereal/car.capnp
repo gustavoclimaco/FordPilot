@@ -1,4 +1,4 @@
-using Cxx = import "./include/c++.capnp";
+﻿using Cxx = import "./include/c++.capnp";
 $Cxx.namespace("cereal");
 
 @0x8e2af1e708af8b8d;
@@ -613,6 +613,7 @@ struct CarParams {
     volkswagenMqbEvo @29;
     chryslerCusw @30;
     psa @31;
+    gwm @32;
   }
 
   enum SteerControlType {

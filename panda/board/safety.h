@@ -1,4 +1,4 @@
-#include "safety_declarations.h"
+﻿#include "safety_declarations.h"
 #include "can_definitions.h"
 
 // include the safety policies.
@@ -13,6 +13,7 @@
 #include "safety/safety_subaru.h"
 #include "safety/safety_subaru_preglobal.h"
 #include "safety/safety_mazda.h"
+#include "safety/safety_gwm.h"
 #include "safety/safety_nissan.h"
 #include "safety/safety_volkswagen_mqb.h"
 #include "safety/safety_volkswagen_pq.h"
@@ -51,6 +52,7 @@
 #define SAFETY_FAW 26U
 #define SAFETY_BODY 27U
 #define SAFETY_HYUNDAI_CANFD 28U
+#define SAFETY_GWM 32U
 
 uint16_t current_safety_mode = SAFETY_SILENT;
 uint16_t current_safety_param = 0;
@@ -310,6 +312,7 @@ const safety_hook_config safety_hook_registry[] = {
   {SAFETY_NOOUTPUT, &nooutput_hooks},
   {SAFETY_HYUNDAI_LEGACY, &hyundai_legacy_hooks},
   {SAFETY_MAZDA, &mazda_hooks},
+  {SAFETY_GWM, &gwm_hooks},
   {SAFETY_BODY, &body_hooks},
   {SAFETY_FORD, &ford_hooks},
 #ifdef CANFD
