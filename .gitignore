@@ -17,6 +17,7 @@ a.out
 *.dylib
 *.DSYM
 *.d
+moc_*
 *.pyc
 *.pyo
 .*.swp
