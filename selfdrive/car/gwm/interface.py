@@ -36,14 +36,13 @@ class CarInterface(CarInterfaceBase):
 
     ret.steerActuatorDelay = 0.3
     ret.steerLimitTimer = 0.4
-    ret.steerAtStandstill = False
 
     ret.steerControlType = car.CarParams.SteerControlType.torque
     CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
 
     ret.radarUnavailable = True
 
-    ret.alphaLongitudinalAvailable = True
+    ret.experimentalLongitudinalAvailable = True
     if experimental_long:
       ret.openpilotLongitudinalControl = True
       ret.safetyConfigs[-1].safetyParam |= GwmFlags.LONG_CONTROL.value
