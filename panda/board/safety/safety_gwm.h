@@ -17,6 +17,8 @@
 
 #define GWM_KPH_TO_MS 0.277778f
 
+bool gwm_longitudinal = false;
+
 static uint8_t gwm_get_counter(const CANPacket_t *msg) {
   uint8_t cnt = 0;
   if ((msg->addr == GWM_SPEED) || (msg->addr == GWM_ADAS_ACTIVATION)) {
@@ -161,6 +163,35 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
   return tx;
 }
 
+static int gwm_fwd_hook(int bus_num, int addr) {
+  int bus_fwd = -1;
+
+  switch (bus_num) {
+    case GWM_MAIN_BUS: {
+      // Block EPS steering feedback that openpilot spoofs toward the camera
+      if (addr != GWM_RX_STEER_RELATED) {
+        bus_fwd = GWM_CAMERA_BUS;
+      }
+      break;
+    }
+    case GWM_CAMERA_BUS: {
+      bool block_msg = (addr == GWM_STEER_CMD) || (addr == GWM_HUD);
+      // Block stock ACC command only when openpilot controls longitudinal
+      block_msg |= gwm_longitudinal && (addr == GWM_LONG_CONTROL);
+      if (!block_msg) {
+        bus_fwd = GWM_MAIN_BUS;
+      }
+      break;
+    }
+    default: {
+      // No other buses are forwarded
+      break;
+    }
+  }
+
+  return bus_fwd;
+}
+
 static safety_config gwm_init(uint16_t param) {
   static const CanMsg GWM_TX_MSGS[] = {
     {GWM_ADAS_ACTIVATION, GWM_CAMERA_BUS, 8},   // Cancel command
@@ -190,7 +221,7 @@ static safety_config gwm_init(uint16_t param) {
     {.msg = {{GWM_HUD, GWM_CAMERA_BUS, 64, .frequency = 20U}, { 0 }, { 0 }}},
   };
 
-  bool gwm_longitudinal = false;
+  gwm_longitudinal = false;
   #ifdef ALLOW_DEBUG
     const int FLAG_GWM_LONG_CONTROL = 1;
     gwm_longitudinal = GET_FLAG(param, FLAG_GWM_LONG_CONTROL);
@@ -206,6 +237,7 @@ const safety_hooks gwm_hooks = {
   .init = gwm_init,
   .rx = gwm_rx_hook,
   .tx = gwm_tx_hook,
+  .fwd = gwm_fwd_hook,
   .get_counter = gwm_get_counter,
   .get_checksum = gwm_get_checksum,
   .compute_checksum = gwm_compute_checksum,
