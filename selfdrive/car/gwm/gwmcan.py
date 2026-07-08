@@ -1,4 +1,4 @@
-﻿import numpy as np
+import numpy as np
 from opendbc.can.packer import CANPacker
 from openpilot.selfdrive.car import CanBusBase
 

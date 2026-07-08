@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #define GWM_ADAS_ACTIVATION      0xA1U // RX from STEER_AND_AP_STALK
 #define GWM_GAS                  0x60U // RX from CAR_OVERALL_SIGNALS

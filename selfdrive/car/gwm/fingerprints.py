@@ -1,4 +1,4 @@
-﻿from cereal import car
+from cereal import car
 from openpilot.selfdrive.car.gwm.values import CAR
 
 Ecu = car.CarParams.Ecu

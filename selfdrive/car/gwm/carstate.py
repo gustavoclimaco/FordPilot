@@ -1,4 +1,4 @@
-﻿import copy
+import copy
 
 from cereal import car, custom
 from opendbc.can.parser import CANParser

@@ -1,4 +1,4 @@
-﻿import numpy as np
+import numpy as np
 from cereal import car
 from opendbc.can.packer import CANPacker
 from openpilot.selfdrive.car import apply_meas_steer_torque_limits
