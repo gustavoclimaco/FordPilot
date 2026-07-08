@@ -33,10 +33,10 @@ def create_steer_command(packer: CANPacker, CAN: CanBus, camera_stock_values, st
   }
 
   # calculate and insert basic checksum
-  dat = packer.make_can_msg("STEER_CMD", 0, values)[1]
+  dat = packer.make_can_msg("STEER_CMD", 0, values)[2]
   values["BASIC_CHECKSUM"] = gwm_basic_chksum_for_0x12B(dat)
   # calculate and insert CRC
-  dat = packer.make_can_msg("STEER_CMD", 0, values)[1]
+  dat = packer.make_can_msg("STEER_CMD", 0, values)[2]
   values["CRC_X9B"] = checksum(dat[9:16], 0x9B)
 
   return packer.make_can_msg("STEER_CMD", CAN.main, values)
@@ -82,7 +82,7 @@ def create_longitudinal_command(packer: CANPacker, CAN: CanBus, longitudinal_sto
     "STANDSTILL_3": standstill3,
   }
 
-  data = packer.make_can_msg("ACC_CMD", 0, values)[1]
+  data = packer.make_can_msg("ACC_CMD", 0, values)[2]
   values["CRC_BRAKE_0xEF"] = checksum(data[9:16], 0xEF)
   values["CRC_ACC_0x87"] = checksum(data[25:32], 0x87)
 
@@ -110,7 +110,7 @@ def create_wheel_touch(packer: CANPacker, CAN: CanBus, eps_stock_values, ea_simu
   })
 
   # calculate checksum
-  dat = packer.make_can_msg("RX_STEER_RELATED", 0, values)[1]
+  dat = packer.make_can_msg("RX_STEER_RELATED", 0, values)[2]
   values["B_CRC_X61"] = checksum(dat[9:16], 0x61)
 
   return packer.make_can_msg("RX_STEER_RELATED", CAN.camera, values)
@@ -136,7 +136,7 @@ def create_buttons_command(packer: CANPacker, CAN: CanBus, counter: int, stock_m
     "COUNTER": counter,
   }
 
-  data = packer.make_can_msg("STEER_AND_AP_STALK", 0, values)[1]
+  data = packer.make_can_msg("STEER_AND_AP_STALK", 0, values)[2]
   values["CRC_X2D"] = checksum(data[1:8], 0x2D)
 
   return packer.make_can_msg('STEER_AND_AP_STALK', CAN.camera, values)
@@ -159,7 +159,7 @@ def create_hud_command(packer: CANPacker, CAN: CanBus, hud_stock_values, steer_r
     "LKAS_STATE": 5 if steer_required else hud_stock_values["LKAS_STATE"],
   }
 
-  data = packer.make_can_msg("LATERAL_STATE", 0, values)[1]
+  data = packer.make_can_msg("LATERAL_STATE", 0, values)[2]
   values["CRC_X66"] = checksum(data[17:24], 0x66)
 
   return packer.make_can_msg("LATERAL_STATE", CAN.main, values)
