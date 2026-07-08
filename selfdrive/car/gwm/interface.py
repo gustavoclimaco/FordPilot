@@ -49,7 +49,7 @@ class CarInterface(CarInterfaceBase):
       ret.safetyConfigs[-1].safetyParam |= GwmFlags.LONG_CONTROL.value
 
       # Stop & Go: enabled so openpilot holds at standstill and resumes.
-      # The Haval H6 GT has no native S&G â€” resume is handled in carcontroller
+      # The GWM H6 GT has no native S&G â€” resume is handled in carcontroller
       # via an AP_ENABLE_COMMAND pulse when the planner wants to start moving.
       ret.autoResumeSng = True
 

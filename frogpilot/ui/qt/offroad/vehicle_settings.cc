@@ -16,6 +16,7 @@ QStringList getCarNames(const QString &carMake, QMap<QString, QString> &carModel
     {"ford", "ford"},
     {"genesis", "hyundai"},
     {"gmc", "gm"},
+    {"gwm", "gwm"},
     {"holden", "gm"},
     {"honda", "honda"},
     {"hyundai", "hyundai"},
@@ -98,7 +99,7 @@ FrogPilotVehiclesPanel::FrogPilotVehiclesPanel(FrogPilotSettingsWindow *parent) 
 
   QStringList makes = {
     "Acura", "Audi", "Buick", "Cadillac", "Chevrolet", "Chrysler",
-    "CUPRA", "Dodge", "Ford", "Genesis", "GMC", "Holden", "Honda",
+    "CUPRA", "Dodge", "Ford", "Genesis", "GMC", "GWM", "Holden", "Honda",
     "Hyundai", "Jeep", "Kia", "Lexus", "Lincoln", "MAN", "Mazda",
     "Nissan", "Ram", "SEAT", "Škoda", "Subaru", "Tesla", "Toyota",
     "Volkswagen"

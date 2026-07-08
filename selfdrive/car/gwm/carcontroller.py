@@ -11,7 +11,7 @@ LongCtrlState = car.CarControl.Actuators.LongControlState
 MAX_USER_TORQUE = 100  # 1.0 Nm
 
 # Stop & Go resume pulse configuration.
-# The Haval H6 GT has no native Stop & Go: when the car comes to a full stop
+# The GWM H6 GT has no native Stop & Go: when the car comes to a full stop
 # the ACC ECU deactivates (CRUISE_STATE_2 â†’ 0) and waits for a "resume" input.
 # We simulate pressing the AP_ENABLE_COMMAND stalk signal for a short pulse to
 # re-engage the ACC ECU automatically whenever openpilot wants to start moving.

@@ -47,7 +47,7 @@ class CarState(CarStateBase):
     ret.vEgo, ret.aEgo = self.update_speed_kf(ret.vEgoRaw)
 
     # Stop & Go fix:
-    # The Haval H6 GT has no native Stop & Go â€” the ACC module deactivates
+    # The GWM H6 GT has no native Stop & Go â€” the ACC module deactivates
     # (CRUISE_STATE_2 â†’ 0) whenever the car stops. This is expected behaviour,
     # NOT a real ACC fault. We must NOT propagate this as accFaulted, otherwise
     # openpilot drops longitudinal control at every stop and can never resume.
