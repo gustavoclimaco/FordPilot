@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import math
 import numpy as np
 import random
 import tomllib
@@ -1053,5 +1054,19 @@ class FrogPilotVariables:
 
     toggle.volt_sng = toggle.car_model == "CHEVROLET_VOLT" and (params.get_bool("VoltSNG") if toggle.tuning_level >= level["VoltSNG"] else default.get_bool("VoltSNG"))
 
-    params_memory.put("FrogPilotToggles", json.dumps(toggle.__dict__))
+    # Qt's QJsonDocument is strict JSON: a single NaN/Infinity anywhere makes the
+    # whole document unparseable, leaving the UI with an EMPTY toggles object
+    # (every .toInt()/.toBool() reads 0/false - e.g. screen_timeout=0 made any
+    # screen tap turn the display off permanently). Python's json happily emits
+    # NaN, so sanitize non-finite floats to null before publishing.
+    def json_safe(value):
+      if isinstance(value, float) and not math.isfinite(value):
+        return None
+      if isinstance(value, (list, tuple)):
+        return [json_safe(v) for v in value]
+      if isinstance(value, dict):
+        return {k: json_safe(v) for k, v in value.items()}
+      return value
+
+    params_memory.put("FrogPilotToggles", json.dumps({k: json_safe(v) for k, v in toggle.__dict__.items()}))
     params_memory.remove("FrogPilotTogglesUpdated")
