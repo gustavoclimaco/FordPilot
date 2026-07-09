@@ -22,6 +22,7 @@ class CarState(CarStateBase):
     self.is_activation_lever_pulled = False
     self.prev_activation_lever_pulled = False
     self.main_on = False
+    self.acc_enabled = False
     self.steer_fault_temporary_counter = 0
 
     # Stop & Go: track cruise state to distinguish standstill from real fault
@@ -105,19 +106,30 @@ class CarState(CarStateBase):
     ret.leftBlindspot = bool(cp.vl["RADAR_BEHIND"]["BSM_LEFT"] > 0)
     ret.rightBlindspot = bool(cp.vl["RADAR_BEHIND"]["BSM_RIGHT"] > 0)
 
-    # Freio nÃ£o Ã© mais tratado como cancelamento total do ACC (05/07/2026).
-    # SÃ³ um cancelamento real (AP_CANCEL_COMMAND) derruba main_on â€” isso Ã© o
-    # que permite o volante (MADS/Always On Lateral) continuar ativo com o
-    # pÃ© no freio.
+    # Two separate latches so the brake behaves like MADS/Always On Lateral:
+    #   main_on      -> lateral availability; only a real stalk cancel
+    #                   (AP_CANCEL_COMMAND, stalk down) clears it.
+    #   acc_enabled  -> longitudinal (ACC); the brake clears ONLY this one,
+    #                   so steering stays active with a foot on the brake.
+    # Pulling the stalk up (falling edge of AP_ENABLE_COMMAND) re-latches
+    # both, which gives openpilot the enabled rising edge (pcmEnable) it
+    # needs to resume ACC after a brake-only disengage - without having to
+    # cancel lateral first.
     if cp.vl["STEER_AND_AP_STALK"]["AP_CANCEL_COMMAND"]:
       self.main_on = False
+      self.acc_enabled = False
+
+    if ret.brakePressed:
+      self.acc_enabled = False
+
     self.is_activation_lever_pulled = bool(cp.vl["STEER_AND_AP_STALK"]["AP_ENABLE_COMMAND"])
-    if not self.is_activation_lever_pulled and self.prev_activation_lever_pulled and not self.main_on:
+    if not self.is_activation_lever_pulled and self.prev_activation_lever_pulled:
       self.main_on = True
+      self.acc_enabled = True
     self.prev_activation_lever_pulled = self.is_activation_lever_pulled
 
     ret.cruiseState.available = self.main_on
-    ret.cruiseState.enabled = self.main_on
+    ret.cruiseState.enabled = self.acc_enabled
 
     return ret, fp_ret
 
