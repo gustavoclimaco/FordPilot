@@ -137,15 +137,11 @@ class CarController(CarControllerBase):
       if self.CP.openpilotLongitudinalControl:
         standstill = actuators.longControlState == LongCtrlState.stopping
         self.accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
-        if self.accel < 0:
-          accel = -abs(self.accel / CarControllerParams.ACCEL_MIN)
-        else:
-          accel = self.accel / CarControllerParams.ACCEL_MAX
         can_sends.append(gwmcan.create_longitudinal_command(
           self.packer,
           self.CAN,
           longitudinal_stock_values=CS.longitudinal_stock_values,
-          accel=accel,
+          accel=self.accel,
           active=CC.longActive,
           standstill=standstill,
         ))

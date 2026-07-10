@@ -2,6 +2,11 @@ import numpy as np
 from opendbc.can.packer import CANPacker
 from openpilot.selfdrive.car import CanBusBase
 
+# Desired accel (m/s^2) above which engine drag alone is enough - no brake.
+# With GAS_CMD 0 (stock neutral) the car coasts at roughly -0.3 m/s^2
+# (measured on route 00000056: aEgo -0.2..-0.5 while gas commanded 0).
+COAST_ACCEL = -0.3
+
 
 class CanBus(CanBusBase):
   def __init__(self, CP=None, fingerprint=None) -> None:
@@ -59,23 +64,31 @@ def create_longitudinal_command(packer: CANPacker, CAN: CanBus, longitudinal_sto
   standstill3 = longitudinal_stock_values["STANDSTILL_3"]
   brake_cmd = 0
   accel_cmd = 0
-  if accel < 0 and active:
+  # accel is the desired acceleration in m/s^2, already clipped to
+  # [ACCEL_MIN, ACCEL_MAX]. Calibration anchors so far: GAS_CMD 0 = stock
+  # neutral, coasting at ~ -0.3 m/s^2; GAS_CMD 4577 ~ ACCEL_MAX; observed
+  # active brake range -41..-107. The previous maps (gas floor 250 at zero
+  # desired accel, brake jumping straight to -41 for any negative) were both
+  # discontinuous around zero, so the planner's small corrections behind a
+  # lead flipped between throttle and hard brake - violent surge/brake
+  # cycling. Both maps are now continuous through the coast region.
+  if active and accel < COAST_ACCEL:
+    # More decel than engine drag provides: use brakes, ramping from the
+    # lightest observed active value.
     brake_or_gas = 13
-    brake_cmd = (accel * (107 - 41)) - 41
+    brake_cmd = np.interp(accel, [-3.5, COAST_ACCEL], [-107, -41])
     accel_cmd = 0
     standstill1 = 1 if standstill else 0
     standstill2 = 3 if standstill else 4  # 3 "active" 4 "inactive"
     standstill3 = 0 if standstill else 1  # 0 "active" 1 "inactive"
   elif active:
+    # Gas request, continuous from stock neutral. Desired accels in
+    # [COAST_ACCEL, 0) also land here with gas 0: engine drag covers them
+    # without touching the brakes. No feedforward floor - at zero desired
+    # accel we command neutral and let openpilot's PI close the residual gap.
     brake_or_gas = 12
     brake_cmd = 0
-    # No deadzone: the old [0.25, 1] -> [0, 4577] mapping zeroed the gas command
-    # for any desired accel below 0.5 m/s^2 real (accel here is normalized by
-    # ACCEL_MAX=2), so the car coasted/decelerated during normal cruise and
-    # could never close the gap to the set speed (rlog: cmd +0.25..0.31 m/s^2
-    # produced measured aEgo of -0.2..-0.5). Low-end points are a first-pass
-    # feedforward floor; calibrate against stock ACC GAS_CMD vs aEgo logs.
-    accel_cmd = np.interp(accel, [0.0, 0.15, 1.0], [250, 900, 4577])
+    accel_cmd = np.interp(accel, [0.0, 2.0], [0, 4577])
     standstill1 = 0
     standstill2 = 4  # 3 "active" 4 "inactive"
     standstill3 = 1  # 0 "active" 1 "inactive"
