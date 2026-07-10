@@ -235,6 +235,10 @@ void FrogPilotAnnotatedCameraWidget::paintFrogPilotWidgets(QPainter &p, UIState 
     paintRoadName(p);
   }
 
+  if (!frogpilot_scene.map_open && frogpilot_toggles.value("steering_metrics").toBool()) {
+    paintSteeringTorqueWidget(p, fpsm["carControl"].getCarControl());
+  }
+
   if (!bigMapOpen && (mutcdSpeedLimit || viennaSpeedLimit) && frogpilot_toggles.value("speed_limit_sources").toBool()) {
     paintSpeedLimitSources(p, frogpilotCarState, frogpilotNavigation, frogpilotPlan);
   }
@@ -773,6 +777,61 @@ void FrogPilotAnnotatedCameraWidget::paintRoadName(QPainter &p) {
   p.setFont(font);
   p.setPen(QPen(whiteColor(), 6));
   p.drawText(roadNameRect, Qt::AlignCenter, roadName);
+
+  p.restore();
+}
+
+void FrogPilotAnnotatedCameraWidget::paintSteeringTorqueWidget(QPainter &p, const cereal::CarControl::Reader &carControl) {
+  // sunnypilot-style steering torque gauge: a centered horizontal bar that
+  // fills from the middle toward the steering direction, green -> amber ->
+  // red as the command approaches the EPS limit (|actuators.steer| = 1).
+  float steer = carControl.getActuators().getSteer();
+
+  static float smoothedSteer = 0.0f;
+  smoothedSteer = 0.25f * steer + 0.75f * smoothedSteer;
+
+  float magnitude = std::min(std::abs(smoothedSteer), 1.0f);
+
+  p.save();
+
+  int barWidth = 600;
+  int barHeight = 34;
+  int x = (width() - barWidth) / 2;
+  int y = rect().bottom() - 130;
+
+  QRect bgRect(x, y, barWidth, barHeight);
+  p.setPen(Qt::NoPen);
+  p.setBrush(blackColor(166));
+  p.drawRoundedRect(bgRect, barHeight / 2, barHeight / 2);
+
+  QColor fillColor;
+  if (magnitude < 0.5f) {
+    fillColor = QColor(0, 220, 110, 230);
+  } else if (magnitude < 0.8f) {
+    fillColor = QColor(255, 190, 0, 230);
+  } else {
+    fillColor = QColor(255, 60, 60, 240);
+  }
+
+  int centerX = x + barWidth / 2;
+  int halfSpan = barWidth / 2 - 8;
+  int fillLength = int(halfSpan * magnitude);
+  QRect fillRect;
+  if (smoothedSteer > 0.0f) {
+    // positive actuators.steer = steering left; fill toward the left
+    fillRect = QRect(centerX - fillLength, y + 7, fillLength, barHeight - 14);
+  } else {
+    fillRect = QRect(centerX, y + 7, fillLength, barHeight - 14);
+  }
+  p.setBrush(fillColor);
+  p.drawRoundedRect(fillRect, (barHeight - 14) / 2, (barHeight - 14) / 2);
+
+  p.setPen(QPen(whiteColor(200), 3));
+  p.drawLine(centerX, y + 5, centerX, y + barHeight - 5);
+
+  p.setFont(InterFont(26, QFont::DemiBold));
+  p.setPen(QPen(whiteColor(), 4));
+  p.drawText(QRect(x, y - 36, barWidth, 32), Qt::AlignCenter, QString("%1%").arg(qRound(magnitude * 100.0f)));
 
   p.restore();
 }
