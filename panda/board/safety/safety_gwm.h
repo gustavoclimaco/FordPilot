@@ -99,19 +99,25 @@ static void gwm_rx_hook(const CANPacket_t *msg) {
     // state machine to enter and exit controls for button enabling
     if (msg->addr == GWM_ADAS_ACTIVATION) {
       bool cruise_button = GET_BIT(msg, 47U);
-      // enter controls on the rising edge of set or resume
+      // (Re)enter controls on every rising edge of the stalk pull, directly
+      // (button-style engagement, like hyundai/gm). This must not go through
+      // pcm_cruise_check: the brake clears controls_allowed (generic safety)
+      // WITHOUT clearing acc_main_on, so a stalk pull after a brake-only
+      // disengage produced no rising edge on acc_main_on and controls_allowed
+      // stayed latched false while openpilot re-engaged -> permanent
+      // "Controls Mismatch" (confirmed in route 0000005b--75dacbd411).
       if (cruise_button && !cruise_button_prev) {
         acc_main_on = true;
+        controls_allowed = true;
       }
-      // exit controls once cancel is pressed.
-      // NOTE: brake_pressed is intentionally NOT included here. Freio nÃ£o
-      // deve derrubar o controle lateral (Always On Lateral) â€” sÃ³ um
-      // cancelamento real do ACC (alavanca) deve fazer isso.
+      // exit controls once cancel is pressed (stalk down). The brake is
+      // intentionally NOT included here: it must not drop acc_main_on, so
+      // Always On Lateral keeps steering with a foot on the brake.
       bool cancel_button = GET_BIT(msg, 46U);
       if (cancel_button) {
         acc_main_on = false;
+        controls_allowed = false;
       }
-      pcm_cruise_check(acc_main_on);
       cruise_button_prev = cruise_button ? 1 : 0;
     }
   }
