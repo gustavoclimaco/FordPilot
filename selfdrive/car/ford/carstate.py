@@ -31,6 +31,9 @@ class CarState(CarStateBase):
     self.prev_distance_button = 0
     self.distance_button = 0
 
+    self.cruise_buttons = {"accel": 0, "decel": 0, "resume": 0, "cancel": 0}
+    self.prev_cruise_buttons = dict(self.cruise_buttons)
+
   def update(self, cp, cp_cam, frogpilot_toggles):
     ret = car.CarState.new_message()
     fp_ret = custom.FrogPilotCarState.new_message()
@@ -108,8 +111,15 @@ class CarState(CarStateBase):
     ret.gearShifter = GearShifter.reverse if bool(cp.vl["BCM_Lamp_Stat_FD1"]["RvrseLghtOn_B_Stat"]) else GearShifter.drive
 
     # safety
-    ret.stockFcw = bool(cp_cam.vl["ACCDATA_3"]["FcwVisblWarn_B_Rq"])
-    ret.stockAeb = bool(cp_cam.vl["ACCDATA_2"]["CmbbBrkDecel_B_Rq"])
+    if self.CP.flags & FordFlags.ALT_STEER_ANGLE:
+      # Retrofit setups (non-factory-matched IPMA/CADS) flood spurious FCW/AEB
+      # flags, spamming "BRAKE" alerts while driving. The stock collision
+      # warning data is not trustworthy on these cars, so don't pass it through.
+      ret.stockFcw = False
+      ret.stockAeb = False
+    else:
+      ret.stockFcw = bool(cp_cam.vl["ACCDATA_3"]["FcwVisblWarn_B_Rq"])
+      ret.stockAeb = bool(cp_cam.vl["ACCDATA_2"]["CmbbBrkDecel_B_Rq"])
 
     # button presses
     ret.leftBlinker = cp.vl["Steering_Data_FD1"]["TurnLghtSwtch_D_Stat"] == 1
@@ -118,6 +128,16 @@ class CarState(CarStateBase):
     ret.genericToggle = bool(cp.vl["Steering_Data_FD1"]["TjaButtnOnOffPress"])
     self.prev_distance_button = self.distance_button
     self.distance_button = cp.vl["Steering_Data_FD1"]["AccButtnGapTogglePress"]
+
+    # Cruise buttons (used for button-based engagement when openpilot owns
+    # longitudinal control - pcmCruise off on the Fusion retrofit)
+    self.prev_cruise_buttons = self.cruise_buttons
+    self.cruise_buttons = {
+      "accel": cp.vl["Steering_Data_FD1"]["CcAslButtnSetIncPress"],
+      "decel": cp.vl["Steering_Data_FD1"]["CcAslButtnSetDecPress"],
+      "resume": cp.vl["Steering_Data_FD1"]["CcAsllButtnResPress"],
+      "cancel": cp.vl["Steering_Data_FD1"]["CcAslButtnCnclPress"],
+    }
 
     # lock info
     ret.doorOpen = any([cp.vl["BodyInfo_3_FD1"]["DrStatDrv_B_Actl"], cp.vl["BodyInfo_3_FD1"]["DrStatPsngr_B_Actl"],

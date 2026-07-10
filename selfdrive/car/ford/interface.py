@@ -30,9 +30,15 @@ class CarInterface(CarInterfaceBase):
     ret.safetyConfigs = cfgs
 
     ret.experimentalLongitudinalAvailable = True
-    if experimental_long:
+    # ALT_STEER_ANGLE (Fusion retrofit): the stock PCM refuses/drops ACC below
+    # ~30 km/h, so stock longitudinal can never do stop&go. Force openpilot
+    # longitudinal at all speeds, with button-based engagement (pcmCruise off)
+    # so neither openpilot nor the panda depend on the PCM cruise state.
+    if experimental_long or bool(ret.flags & FordFlags.ALT_STEER_ANGLE):
       ret.safetyConfigs[-1].safetyParam |= Panda.FLAG_FORD_LONG_CONTROL
       ret.openpilotLongitudinalControl = True
+      if ret.flags & FordFlags.ALT_STEER_ANGLE:
+        ret.pcmCruise = False
 
     if ret.flags & FordFlags.CANFD:
       ret.safetyConfigs[-1].safetyParam |= Panda.FLAG_FORD_CANFD
@@ -74,9 +80,14 @@ class CarInterface(CarInterfaceBase):
     ret.buttonEvents = [
       *create_button_events(self.CS.distance_button, self.CS.prev_distance_button, {1: ButtonType.gapAdjustCruise}),
       *create_button_events(self.CS.lkas_enabled, self.CS.lkas_previously_enabled, {1: FrogPilotButtonType.lkas}),
+      *create_button_events(self.CS.cruise_buttons["accel"], self.CS.prev_cruise_buttons["accel"], {1: ButtonType.accelCruise}),
+      *create_button_events(self.CS.cruise_buttons["decel"], self.CS.prev_cruise_buttons["decel"], {1: ButtonType.decelCruise}),
+      *create_button_events(self.CS.cruise_buttons["resume"], self.CS.prev_cruise_buttons["resume"], {1: ButtonType.resumeCruise}),
+      *create_button_events(self.CS.cruise_buttons["cancel"], self.CS.prev_cruise_buttons["cancel"], {1: ButtonType.cancel}),
     ]
 
-    events = self.create_common_events(ret, extra_gears=[GearShifter.manumatic])
+    events = self.create_common_events(ret, extra_gears=[GearShifter.manumatic], pcm_enable=self.CP.pcmCruise,
+                                       enable_buttons=(ButtonType.accelCruise, ButtonType.decelCruise, ButtonType.resumeCruise))
     if not self.CS.vehicle_sensors_valid:
       events.add(car.CarEvent.EventName.vehicleSensorsInvalid)
 

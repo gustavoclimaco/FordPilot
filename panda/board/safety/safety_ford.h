@@ -142,6 +142,7 @@ const uint16_t FORD_PARAM_CANFD = 2;
 
 bool ford_longitudinal = false;
 bool ford_canfd = false;
+bool ford_set_or_res_prev = false;
 
 const LongitudinalLimits FORD_LONG_LIMITS = {
   // acceleration cmd limits (used for brakes)
@@ -246,8 +247,32 @@ static void ford_rx_hook(const CANPacket_t *to_push) {
       // Signal: CcStat_D_Actl
       unsigned int cruise_state = GET_BYTE(to_push, 1) & 0x07U;
       acc_main_on = (cruise_state == 3U) ||(cruise_state == 4U) || (cruise_state == 5U);
-      bool cruise_engaged = (cruise_state == 4U) || (cruise_state == 5U);
-      pcm_cruise_check(cruise_engaged);
+      if (ford_longitudinal) {
+        // openpilot owns longitudinal at all speeds: engagement is button-based
+        // (see FORD_Steering_Data_FD1 below). Tying controls_allowed to CcStat
+        // made stop&go impossible on PCMs that refuse/drop ACC below ~30 km/h
+        // (e.g. Fusion retrofit). ACC main switch off still disengages.
+        if (!acc_main_on) {
+          controls_allowed = false;
+        }
+      } else {
+        bool cruise_engaged = (cruise_state == 4U) || (cruise_state == 5U);
+        pcm_cruise_check(cruise_engaged);
+      }
+    }
+
+    // Button-based engagement when openpilot owns longitudinal
+    if (ford_longitudinal && (addr == FORD_Steering_Data_FD1)) {
+      // Signals: CcAslButtnSetIncPress (bit 27), CcAslButtnSetDecPress (bit 28),
+      //          CcAsllButtnResPress (bit 25), CcAslButtnCnclPress (bit 8)
+      bool set_or_res_pressed = GET_BIT(to_push, 27U) || GET_BIT(to_push, 28U) || GET_BIT(to_push, 25U);
+      if (GET_BIT(to_push, 8U)) {
+        controls_allowed = false;
+      } else if (set_or_res_pressed && !ford_set_or_res_prev && acc_main_on) {
+        controls_allowed = true;
+      } else {
+      }
+      ford_set_or_res_prev = set_or_res_pressed;
     }
 
     // If steering controls messages are received on the destination bus, it's an indication
@@ -396,6 +421,7 @@ static int ford_fwd_hook(int bus_num, int addr) {
 
 static safety_config ford_init(uint16_t param) {
   UNUSED(param);
+  ford_set_or_res_prev = false;
 #ifdef ALLOW_DEBUG
   ford_longitudinal = GET_FLAG(param, FORD_PARAM_LONGITUDINAL);
   ford_canfd = GET_FLAG(param, FORD_PARAM_CANFD);
