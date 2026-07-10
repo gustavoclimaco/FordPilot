@@ -1,5 +1,6 @@
 from cereal import car
 from openpilot.selfdrive.car import CanBusBase
+from openpilot.selfdrive.car.ford.values import FordFlags
 
 HUDControl = car.CarControl.HUDControl
 
@@ -213,6 +214,16 @@ def create_acc_ui_msg(packer, CAN: CanBus, CP, main_on: bool, enabled: bool, fcw
       "AccStopMde_B_Dsply": 1 if standstill else 0,
       "AccWarn_D_Dsply": 0,                                       # ACC warning
       "AccTGap_D_Dsply": hud_control.leadDistanceBars,            # Time gap
+    })
+
+  if CP.flags & FordFlags.ALT_STEER_ANGLE:
+    # Retrofit: the camera's FCW/AEB output is spurious (mismatched IPMA/CADS),
+    # so don't copy its warning flags through to the cluster. openpilot's own
+    # FCW below still overrides.
+    values.update({
+      "FcwVisblWarn_B_Rq": 0,      # FCW visible alert
+      "FcwAudioWarn_B_Rq": 0,      # FCW audio alert
+      "CmbbPostEvnt_B_Dsply": 0,   # AEB event status
     })
 
   # Forwards FCW alert from IPMA

@@ -56,8 +56,12 @@ class CarInterface(CarInterfaceBase):
             ret.dashcamOnly = True
 
     # Auto Transmission: 0x732 ECU or Gear_Shift_by_Wire_FD1
+    # ALT_STEER_ANGLE (Fusion retrofit): the retrofit harness lacks the
+    # shift-by-wire ECU/message, so detection falls through to manual and picks
+    # up a 20 mph minEnableSpeed - which disengages openpilot below ~32 km/h
+    # and disables stop&go. The car is an automatic; force it.
     found_ecus = [fw.ecu for fw in car_fw]
-    if Ecu.shiftByWire in found_ecus or 0x5A in fingerprint[CAN.main] or docs:
+    if Ecu.shiftByWire in found_ecus or 0x5A in fingerprint[CAN.main] or docs or bool(ret.flags & FordFlags.ALT_STEER_ANGLE):
       ret.transmissionType = TransmissionType.automatic
     else:
       ret.transmissionType = TransmissionType.manual
