@@ -109,9 +109,15 @@ def can_fingerprint(next_can: Callable) -> tuple[str | None, dict[int, dict]]:
 
 
 # **** for use live only ****
-def fingerprint(logcan, sendcan, num_pandas):
+def fingerprint(logcan, sendcan, num_pandas, skip_queries=False):
   fixed_fingerprint = os.environ.get('FINGERPRINT', "")
-  skip_fw_query = os.environ.get('SKIP_FW_QUERY', False)
+  # skip_queries: when the user forces the car model (FrogPilot manual selection),
+  # there is no reason to send VIN/FW UDS queries. On cars/harnesses where a CAN
+  # bus is unused (e.g. GWM Haval H6: bus 1 is an empty slot), those unacked TX
+  # frames retransmit forever, causing a permanent error-frame storm on that bus
+  # (~1.6k errors/s measured), an interruptRateCan2 panda fault, and intermittent
+  # rx-check lagging -> controls mismatch.
+  skip_fw_query = bool(os.environ.get('SKIP_FW_QUERY', False)) or skip_queries
   disable_fw_cache = os.environ.get('DISABLE_FW_CACHE', False)
   ecu_rx_addrs = set()
   params = Params()
@@ -190,7 +196,8 @@ def get_car_interface(CP, FPCP):
 
 
 def get_car(logcan, sendcan, experimental_long_allowed, params, num_pandas=1, frogpilot_toggles=None):
-  candidate, fingerprints, vin, car_fw, source, exact_match = fingerprint(logcan, sendcan, num_pandas)
+  skip_queries = frogpilot_toggles is not None and bool(frogpilot_toggles.force_fingerprint)
+  candidate, fingerprints, vin, car_fw, source, exact_match = fingerprint(logcan, sendcan, num_pandas, skip_queries=skip_queries)
 
   if candidate is None or frogpilot_toggles.force_fingerprint:
     if frogpilot_toggles.car_model is not None:

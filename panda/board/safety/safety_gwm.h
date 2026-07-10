@@ -168,8 +168,14 @@ static int gwm_fwd_hook(int bus_num, int addr) {
 
   switch (bus_num) {
     case GWM_MAIN_BUS: {
-      // Block EPS steering feedback that openpilot spoofs toward the camera
-      if (addr != GWM_RX_STEER_RELATED) {
+      // Block messages that openpilot spoofs toward the camera:
+      //  - GWM_RX_STEER_RELATED: EPS steering feedback (wheel touch spoof)
+      //  - GWM_ADAS_ACTIVATION: stalk message. openpilot re-emits it at 100Hz
+      //    with its own continuous counter, flipping AP_ENABLE/AP_CANCEL for
+      //    Stop & Go resume and cancel. Forwarding the stock copy in parallel
+      //    interleaved duplicate counters at the camera, which made it reject
+      //    the injected resume pulse (S&G never resumed).
+      if ((addr != GWM_RX_STEER_RELATED) && (addr != GWM_ADAS_ACTIVATION)) {
         bus_fwd = GWM_CAMERA_BUS;
       }
       break;
@@ -208,17 +214,18 @@ static safety_config gwm_init(uint16_t param) {
     {GWM_HUD, GWM_MAIN_BUS, 64},                // HUD and dashboard
   };
 
+  // Keep rx checks only on safety-critical bus 0 messages. Camera-bus (bus 2)
+  // and comfort messages (BSM) were removed on purpose: any transient pause on
+  // those streams tripped the 1s lagging check in safety.h, silently clearing
+  // controls_allowed while openpilot stayed engaged -> "Controls Mismatch"
+  // disengages. The openpilot side still monitors camera messages via the CAN
+  // parser (canValid), so a dead camera is not silent.
   static RxCheck gwm_rx_checks[] = {
     {.msg = {{GWM_ADAS_ACTIVATION, GWM_MAIN_BUS, 8, .check_checksum = true, .max_counter = 15U, .frequency = 100U}, { 0 }, { 0 }}},
     {.msg = {{GWM_SPEED, GWM_MAIN_BUS, 64, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
     {.msg = {{GWM_GAS, GWM_MAIN_BUS, 64, .frequency = 50U}, { 0 }, { 0 }}},
     {.msg = {{GWM_BRAKE, GWM_MAIN_BUS, 64, .frequency = 50U}, { 0 }, { 0 }}},
     {.msg = {{GWM_RX_STEER_RELATED, GWM_MAIN_BUS, 64, .frequency = 50U}, { 0 }, { 0 }}},
-    {.msg = {{GWM_STEER_CMD, GWM_CAMERA_BUS, 64, .frequency = 50U}, { 0 }, { 0 }}},
-    {.msg = {{GWM_CRUISE, GWM_CAMERA_BUS, 64, .frequency = 10U}, { 0 }, { 0 }}},
-    {.msg = {{GWM_LONG_CONTROL, GWM_CAMERA_BUS, 64, .frequency = 50U}, { 0 }, { 0 }}},
-    {.msg = {{GWM_BLIND_SPOT, GWM_MAIN_BUS, 64, .frequency = 50U}, { 0 }, { 0 }}},
-    {.msg = {{GWM_HUD, GWM_CAMERA_BUS, 64, .frequency = 20U}, { 0 }, { 0 }}},
   };
 
   gwm_longitudinal = false;

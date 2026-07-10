@@ -71,7 +71,13 @@ class CarInterface(CarInterfaceBase):
       # stoppingDecelRate: how fast OP ramps decel to stopAccel (m/sÂ³).
       ret.stoppingDecelRate = 0.75
 
-      ret.longitudinalTuning.kiBP = [0.]
-      ret.longitudinalTuning.kiV = [0.4]
+      # kp was missing (upAccelCmd logged 0.0 in 100% of engaged frames), leaving
+      # a pure-integral controller that took forever to build up accel. Combined
+      # with the old gas-command deadzone this kept the car ~20 km/h under the
+      # set speed indefinitely.
+      ret.longitudinalTuning.kpBP = [0., 5., 20.]
+      ret.longitudinalTuning.kpV = [1.3, 1.0, 0.7]
+      ret.longitudinalTuning.kiBP = [0., 5., 20.]
+      ret.longitudinalTuning.kiV = [0.35, 0.25, 0.20]
 
     return ret

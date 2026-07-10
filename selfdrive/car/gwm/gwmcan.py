@@ -69,7 +69,13 @@ def create_longitudinal_command(packer: CANPacker, CAN: CanBus, longitudinal_sto
   elif active:
     brake_or_gas = 12
     brake_cmd = 0
-    accel_cmd = np.interp(accel, [0.25, 1], [0, 4577])
+    # No deadzone: the old [0.25, 1] -> [0, 4577] mapping zeroed the gas command
+    # for any desired accel below 0.5 m/s^2 real (accel here is normalized by
+    # ACCEL_MAX=2), so the car coasted/decelerated during normal cruise and
+    # could never close the gap to the set speed (rlog: cmd +0.25..0.31 m/s^2
+    # produced measured aEgo of -0.2..-0.5). Low-end points are a first-pass
+    # feedforward floor; calibrate against stock ACC GAS_CMD vs aEgo logs.
+    accel_cmd = np.interp(accel, [0.0, 0.15, 1.0], [250, 900, 4577])
     standstill1 = 0
     standstill2 = 4  # 3 "active" 4 "inactive"
     standstill3 = 1  # 0 "active" 1 "inactive"
