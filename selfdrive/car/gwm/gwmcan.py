@@ -3,9 +3,9 @@ from opendbc.can.packer import CANPacker
 from openpilot.selfdrive.car import CanBusBase
 
 # Desired accel (m/s^2) above which engine drag alone is enough - no brake.
-# With GAS_CMD 0 (stock neutral) the car coasts at roughly -0.3 m/s^2
-# (measured on route 00000056: aEgo -0.2..-0.5 while gas commanded 0).
-COAST_ACCEL = -0.3
+# Route 0000005d (25 min, 54k engaged frames): gas 0 coasts at only about
+# -0.1..-0.2 above 15 km/h (stronger at low speed in gear).
+COAST_ACCEL = -0.2
 
 
 class CanBus(CanBusBase):
@@ -65,18 +65,17 @@ def create_longitudinal_command(packer: CANPacker, CAN: CanBus, longitudinal_sto
   brake_cmd = 0
   accel_cmd = 0
   # accel is the desired acceleration in m/s^2, already clipped to
-  # [ACCEL_MIN, ACCEL_MAX]. Calibration anchors so far: GAS_CMD 0 = stock
-  # neutral, coasting at ~ -0.3 m/s^2; GAS_CMD 4577 ~ ACCEL_MAX; observed
-  # active brake range -41..-107. The previous maps (gas floor 250 at zero
-  # desired accel, brake jumping straight to -41 for any negative) were both
-  # discontinuous around zero, so the planner's small corrections behind a
-  # lead flipped between throttle and hard brake - violent surge/brake
-  # cycling. Both maps are now continuous through the coast region.
+  # [ACCEL_MIN, ACCEL_MAX]. Both maps below are calibrated from measured
+  # cmd -> aEgo medians on route 0000005d--a8ef4509d7 (25 min, 54k engaged
+  # frames). The previous linear maps under-delivered by ~2x across the
+  # range: gas 1500 for a 0.67 m/s^2 request produced only ~0.31 (sluggish
+  # resumes), and brake -41..-50 produced only ~ -0.06, so light braking
+  # did nothing until the planner escalated and the brakes bit deep all at
+  # once (felt as harsh late braking behind leads).
   if active and accel < COAST_ACCEL:
-    # More decel than engine drag provides: use brakes, ramping from the
-    # lightest observed active value.
+    # Measured: -55 ~ -0.57, -65 ~ -1.04, -75 ~ -1.29, -85 ~ -2.0, -95 ~ -2.32
     brake_or_gas = 13
-    brake_cmd = np.interp(accel, [-3.5, COAST_ACCEL], [-107, -41])
+    brake_cmd = np.interp(accel, [-3.5, -2.3, -1.3, -0.6, COAST_ACCEL], [-107, -95, -75, -55, -44])
     accel_cmd = 0
     standstill1 = 1 if standstill else 0
     standstill2 = 3 if standstill else 4  # 3 "active" 4 "inactive"
@@ -84,11 +83,13 @@ def create_longitudinal_command(packer: CANPacker, CAN: CanBus, longitudinal_sto
   elif active:
     # Gas request, continuous from stock neutral. Desired accels in
     # [COAST_ACCEL, 0) also land here with gas 0: engine drag covers them
-    # without touching the brakes. No feedforward floor - at zero desired
-    # accel we command neutral and let openpilot's PI close the residual gap.
+    # without touching the brakes.
+    # Measured: ~700 ~ +0.15, ~1300 ~ +0.28, ~2000 ~ +0.56, ~2400 ~ +0.66.
+    # Above ~0.7 m/s^2 the data thins out (transients only); extrapolate
+    # to the previously observed ceiling 4577 and let the PI close the gap.
     brake_or_gas = 12
     brake_cmd = 0
-    accel_cmd = np.interp(accel, [0.0, 2.0], [0, 4577])
+    accel_cmd = np.interp(accel, [0.0, 0.15, 0.3, 0.6, 1.0, 2.0], [0, 700, 1200, 2200, 3300, 4577])
     standstill1 = 0
     standstill2 = 4  # 3 "active" 4 "inactive"
     standstill3 = 1  # 0 "active" 1 "inactive"
