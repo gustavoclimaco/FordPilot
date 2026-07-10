@@ -1,11 +1,5 @@
-import numpy as np
 from opendbc.can.packer import CANPacker
 from openpilot.selfdrive.car import CanBusBase
-
-# Desired accel (m/s^2) above which engine drag alone is enough - no brake.
-# Route 0000005d (25 min, 54k engaged frames): gas 0 coasts at only about
-# -0.1..-0.2 above 15 km/h (stronger at low speed in gear).
-COAST_ACCEL = -0.2
 
 
 class CanBus(CanBusBase):
@@ -47,7 +41,12 @@ def create_steer_command(packer: CANPacker, CAN: CanBus, camera_stock_values, st
   return packer.make_can_msg("STEER_CMD", CAN.main, values)
 
 
-def create_longitudinal_command(packer: CANPacker, CAN: CanBus, longitudinal_stock_values, accel: float, active: bool, standstill: bool):
+def create_longitudinal_command(packer: CANPacker, CAN: CanBus, longitudinal_stock_values, gas_cmd: float, brake_cmd: float,
+                                braking: bool, active: bool, standstill: bool):
+  """Packs the ACC_CMD message. gas_cmd/brake_cmd arrive already mapped,
+  hysteresis-gated and slew-limited by the carcontroller (see the maps and
+  calibration notes there); this function only routes them into the right
+  request mode and maintains the stock passthrough/standstill fields."""
   values = {s: longitudinal_stock_values[s] for s in [
     "BYPASSME_1",
     "SPEED_REAL",
@@ -62,41 +61,24 @@ def create_longitudinal_command(packer: CANPacker, CAN: CanBus, longitudinal_sto
   standstill1 = longitudinal_stock_values["STANDSTILL_1"]
   standstill2 = longitudinal_stock_values["STANDSTILL_2"]
   standstill3 = longitudinal_stock_values["STANDSTILL_3"]
-  brake_cmd = 0
-  accel_cmd = 0
-  # accel is the desired acceleration in m/s^2, already clipped to
-  # [ACCEL_MIN, ACCEL_MAX]. Both maps below are calibrated from measured
-  # cmd -> aEgo medians on route 0000005d--a8ef4509d7 (25 min, 54k engaged
-  # frames). The previous linear maps under-delivered by ~2x across the
-  # range: gas 1500 for a 0.67 m/s^2 request produced only ~0.31 (sluggish
-  # resumes), and brake -41..-50 produced only ~ -0.06, so light braking
-  # did nothing until the planner escalated and the brakes bit deep all at
-  # once (felt as harsh late braking behind leads).
-  if active and accel < COAST_ACCEL:
-    # Measured: -55 ~ -0.57, -65 ~ -1.04, -75 ~ -1.29, -85 ~ -2.0, -95 ~ -2.32
+  out_brake = 0
+  out_gas = 0
+  if active and braking:
     brake_or_gas = 13
-    brake_cmd = np.interp(accel, [-3.5, -2.3, -1.3, -0.6, COAST_ACCEL], [-107, -95, -75, -55, -44])
-    accel_cmd = 0
+    out_brake = brake_cmd
     standstill1 = 1 if standstill else 0
     standstill2 = 3 if standstill else 4  # 3 "active" 4 "inactive"
     standstill3 = 0 if standstill else 1  # 0 "active" 1 "inactive"
   elif active:
-    # Gas request, continuous from stock neutral. Desired accels in
-    # [COAST_ACCEL, 0) also land here with gas 0: engine drag covers them
-    # without touching the brakes.
-    # Measured: ~700 ~ +0.15, ~1300 ~ +0.28, ~2000 ~ +0.56, ~2400 ~ +0.66.
-    # Above ~0.7 m/s^2 the data thins out (transients only); extrapolate
-    # to the previously observed ceiling 4577 and let the PI close the gap.
     brake_or_gas = 12
-    brake_cmd = 0
-    accel_cmd = np.interp(accel, [0.0, 0.15, 0.3, 0.6, 1.0, 2.0], [0, 700, 1200, 2200, 3300, 4577])
+    out_gas = gas_cmd
     standstill1 = 0
     standstill2 = 4  # 3 "active" 4 "inactive"
     standstill3 = 1  # 0 "active" 1 "inactive"
   values |= {
     "BRAKE_OR_GAS_REQ": brake_or_gas,
-    "BRAKE_CMD": brake_cmd,
-    "GAS_CMD": accel_cmd,
+    "BRAKE_CMD": out_brake,
+    "GAS_CMD": out_gas,
     "STANDSTILL_1": standstill1,
     "STANDSTILL_2": standstill2,
     "STANDSTILL_3": standstill3,
