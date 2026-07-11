@@ -69,8 +69,10 @@ class CarController(CarControllerBase):
       # CRUISE_STATE_2 values 0/1/2 are all "deactivated" per the DBC. After a
       # stop the ECU sits at 2, and after an expired re-engage it returns to 2
       # - checking == 0 here left the trigger dead exactly when the pulse was
-      # needed (route 0000005e launch aborts).
-      acc_deactivated = (CS.cruise_state_2 <= 2)
+      # needed (route 0000005e launch aborts). State 0 is excluded: observed
+      # only as a latched ACC ECU fault (route 00000061), where pulsing is
+      # useless - carstate raises accFaulted for it instead.
+      acc_deactivated = CS.cruise_state_2 in (1, 2)
 
       should_trigger = (
         CC.longActive

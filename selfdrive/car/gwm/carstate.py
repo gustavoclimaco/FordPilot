@@ -58,8 +58,15 @@ class CarState(CarStateBase):
     self.cruise_state_2 = int(cp_cam.vl["ACC"]["CRUISE_STATE_2"])
 
     if self.CP.openpilotLongitudinalControl:
-      # While OP owns longitudinal: never fault on standstill ACC deactivation
-      ret.accFaulted = False
+      # Standstill deactivation (CRUISE_STATE_2 = 2, sometimes 1) is normal on
+      # this car and handled by the resume pulse - never fault on it. State 0
+      # while MOVING is a real ACC ECU fault: observed on route 00000061
+      # (seg 8, t=625.7), the ECU dropped to 0 one second into a stop&go
+      # launch, locked its reported set speed at 30 km/h (its minimum) and
+      # ignored the stalk until an ignition cycle. Since pcmCruise is true,
+      # openpilot would otherwise silently obey the poisoned 30 km/h set -
+      # surface the fault instead so the driver knows to cycle the ignition.
+      ret.accFaulted = self.cruise_state_2 == 0 and self.main_on and ret.vEgoRaw > 1.0
     else:
       # Stock ACC path: honour the original logic
       ret.accFaulted = self.cruise_state_2 == 0
