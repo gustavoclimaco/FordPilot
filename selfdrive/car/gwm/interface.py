@@ -71,13 +71,14 @@ class CarInterface(CarInterfaceBase):
       # stoppingDecelRate: how fast OP ramps decel to stopAccel (m/sÂ³).
       ret.stoppingDecelRate = 0.75
 
-      # kp was missing (upAccelCmd logged 0.0 in 100% of engaged frames), leaving
-      # a pure-integral controller that took forever to build up accel. Combined
-      # with the old gas-command deadzone this kept the car ~20 km/h under the
-      # set speed indefinitely.
-      ret.longitudinalTuning.kpBP = [0., 5., 20.]
-      ret.longitudinalTuning.kpV = [1.3, 1.0, 0.7]
-      ret.longitudinalTuning.kiBP = [0., 5., 20.]
-      ret.longitudinalTuning.kiV = [0.35, 0.25, 0.20]
+      # Pure-integral controller, as in the original sunnypilot-derived port.
+      # No kp on purpose: proportional gain couples every speed-measurement
+      # jitter straight into the gas/brake command, which on this car felt as
+      # constant pulsing (routes 0000005e/60). The integrator changes the
+      # command smoothly and converges to whatever bias holds the set speed.
+      # The old "stuck 20 km/h under set" failure was the gas map deadzone
+      # (fixed in gwmcan with a single through-zero line), not the missing kp.
+      ret.longitudinalTuning.kiBP = [0.]
+      ret.longitudinalTuning.kiV = [0.4]
 
     return ret

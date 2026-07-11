@@ -27,25 +27,7 @@ MAX_USER_TORQUE = 100  # 1.0 Nm
 #   openpilot still wants to move and the ECU is still deactivated, retry.
 RESUME_PULSE_FRAMES = 20
 RESUME_ACCEL_THRESHOLD = 0.05  # m/s^2
-RESUME_RETRY_FRAMES = 100      # 1 s at 100 Hz
-
-# Longitudinal command shaping (all values in the ACC_CMD phys scale).
-# Maps calibrated from route 0000005d measured cmd -> aEgo medians; see
-# gwmcan.create_longitudinal_command for the anchor points.
-COAST_ACCEL = -0.2       # m/s^2: above this, engine drag alone is enough
-BRAKE_EXIT_ACCEL = -0.05  # m/s^2: hysteresis - leave brake mode only above this
-GAS_MAP_BP = [0.0, 0.15, 0.3, 0.6, 1.0, 2.0]
-GAS_MAP_V = [0, 700, 1200, 2200, 3300, 4577]
-BRAKE_MAP_BP = [-3.5, -2.3, -1.3, -0.6, COAST_ACCEL]
-BRAKE_MAP_V = [-107, -95, -75, -55, -44]
-# Slew limits per 20 ms frame. Route 0000005e showed 216 brake episodes with
-# a median duration of 0.11 s (apply/release chatter around the coast
-# boundary) - felt as pumping. Rate-limiting both commands smooths apply and
-# release; the hysteresis above stops the mode chatter itself.
-GAS_APPLY_SLEW = 120
-GAS_RELEASE_SLEW = 240
-BRAKE_APPLY_SLEW = 4.0
-BRAKE_RELEASE_SLEW = 2.5
+RESUME_RETRY_FRAMES = 50       # 0.5 s at 100 Hz
 
 
 class CarController(CarControllerBase):
@@ -62,11 +44,6 @@ class CarController(CarControllerBase):
     self.resume_required = False
     self.resume_counter = 0   # frames left to pulse AP_ENABLE_COMMAND
     self.resume_cooldown = 0  # frames until another pulse may fire
-
-    # Longitudinal command state (hysteresis + slew)
-    self.braking = False
-    self.gas_cmd = 0.0
-    self.brake_cmd = 0.0
 
     # Free-running counter for the intercepted stalk stream. The panda fwd hook
     # blocks the stock STEER_AND_AP_STALK from reaching the camera, so openpilot
@@ -174,52 +151,21 @@ class CarController(CarControllerBase):
         ea_simulated_torque=ea_simulated_torque,
       ))
 
-      # Longitudinal control
+      # Longitudinal control - original sunnypilot-derived structure: pass the
+      # normalized desired accel straight through; the pure-integral tuning in
+      # interface.py is what keeps the command smooth (no shaping needed here).
       if self.CP.openpilotLongitudinalControl:
         standstill = actuators.longControlState == LongCtrlState.stopping
         self.accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
-
-        if not CC.longActive:
-          self.braking = False
-          self.gas_cmd = 0.0
-          self.brake_cmd = 0.0
+        if self.accel < 0:
+          accel = -abs(self.accel / CarControllerParams.ACCEL_MIN)
         else:
-          # Mode hysteresis: enter brake mode below COAST_ACCEL, hand back to
-          # gas/coast only once the demand has clearly recovered - and only
-          # after the brake pressure has been released gradually.
-          if self.braking:
-            if self.accel > BRAKE_EXIT_ACCEL:
-              brake_target = 0.0
-              if self.brake_cmd > -2.0:
-                self.braking = False
-            else:
-              brake_target = float(np.interp(self.accel, BRAKE_MAP_BP, BRAKE_MAP_V))
-          else:
-            self.braking = self.accel < COAST_ACCEL
-            brake_target = float(np.interp(self.accel, BRAKE_MAP_BP, BRAKE_MAP_V)) if self.braking else 0.0
-
-          if self.braking:
-            self.gas_cmd = 0.0
-            # negative scale: "apply" moves away from 0, "release" toward 0
-            if brake_target < self.brake_cmd:
-              self.brake_cmd = max(brake_target, self.brake_cmd - BRAKE_APPLY_SLEW)
-            else:
-              self.brake_cmd = min(brake_target, self.brake_cmd + BRAKE_RELEASE_SLEW)
-          else:
-            self.brake_cmd = 0.0
-            gas_target = float(np.interp(self.accel, GAS_MAP_BP, GAS_MAP_V))
-            if gas_target > self.gas_cmd:
-              self.gas_cmd = min(gas_target, self.gas_cmd + GAS_APPLY_SLEW)
-            else:
-              self.gas_cmd = max(gas_target, self.gas_cmd - GAS_RELEASE_SLEW)
-
+          accel = self.accel / CarControllerParams.ACCEL_MAX
         can_sends.append(gwmcan.create_longitudinal_command(
           self.packer,
           self.CAN,
           longitudinal_stock_values=CS.longitudinal_stock_values,
-          gas_cmd=self.gas_cmd,
-          brake_cmd=self.brake_cmd,
-          braking=self.braking,
+          accel=accel,
           active=CC.longActive,
           standstill=standstill,
         ))

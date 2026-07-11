@@ -1,3 +1,4 @@
+import numpy as np
 from opendbc.can.packer import CANPacker
 from openpilot.selfdrive.car import CanBusBase
 
@@ -41,12 +42,14 @@ def create_steer_command(packer: CANPacker, CAN: CanBus, camera_stock_values, st
   return packer.make_can_msg("STEER_CMD", CAN.main, values)
 
 
-def create_longitudinal_command(packer: CANPacker, CAN: CanBus, longitudinal_stock_values, gas_cmd: float, brake_cmd: float,
-                                braking: bool, active: bool, standstill: bool):
-  """Packs the ACC_CMD message. gas_cmd/brake_cmd arrive already mapped,
-  hysteresis-gated and slew-limited by the carcontroller (see the maps and
-  calibration notes there); this function only routes them into the right
-  request mode and maintains the stock passthrough/standstill fields."""
+def create_longitudinal_command(packer: CANPacker, CAN: CanBus, longitudinal_stock_values, accel: float, active: bool, standstill: bool):
+  """Original sunnypilot-derived structure: accel arrives normalized
+  (gas [0..1] by ACCEL_MAX, brake [-1..0) by ACCEL_MIN) and maps straight
+  to the command signals. One surgical change from the original: the gas
+  map is a single line through zero instead of the old [0.25, 1] -> [0,
+  4577] deadzone, which zeroed the command for any demand below 0.5 m/s^2
+  real and left the car stuck well under the set speed (route 00000056:
+  planner asking +0.25..0.31 forever, gas 0, aEgo -0.2..-0.5)."""
   values = {s: longitudinal_stock_values[s] for s in [
     "BYPASSME_1",
     "SPEED_REAL",
@@ -61,24 +64,26 @@ def create_longitudinal_command(packer: CANPacker, CAN: CanBus, longitudinal_sto
   standstill1 = longitudinal_stock_values["STANDSTILL_1"]
   standstill2 = longitudinal_stock_values["STANDSTILL_2"]
   standstill3 = longitudinal_stock_values["STANDSTILL_3"]
-  out_brake = 0
-  out_gas = 0
-  if active and braking:
+  brake_cmd = 0
+  accel_cmd = 0
+  if accel < 0 and active:
     brake_or_gas = 13
-    out_brake = brake_cmd
+    brake_cmd = (accel * (107 - 41)) - 41
+    accel_cmd = 0
     standstill1 = 1 if standstill else 0
     standstill2 = 3 if standstill else 4  # 3 "active" 4 "inactive"
     standstill3 = 0 if standstill else 1  # 0 "active" 1 "inactive"
   elif active:
     brake_or_gas = 12
-    out_gas = gas_cmd
+    brake_cmd = 0
+    accel_cmd = np.interp(accel, [0, 1], [0, 4577])
     standstill1 = 0
     standstill2 = 4  # 3 "active" 4 "inactive"
     standstill3 = 1  # 0 "active" 1 "inactive"
   values |= {
     "BRAKE_OR_GAS_REQ": brake_or_gas,
-    "BRAKE_CMD": out_brake,
-    "GAS_CMD": out_gas,
+    "BRAKE_CMD": brake_cmd,
+    "GAS_CMD": accel_cmd,
     "STANDSTILL_1": standstill1,
     "STANDSTILL_2": standstill2,
     "STANDSTILL_3": standstill3,
