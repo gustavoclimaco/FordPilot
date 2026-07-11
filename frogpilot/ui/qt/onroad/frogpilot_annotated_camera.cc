@@ -1,5 +1,9 @@
+#include <algorithm>
+#include <cmath>
+
 #include <QMovie>
 #include <QPainterPath>
+#include <QtMath>
 
 #include "frogpilot/ui/qt/onroad/frogpilot_annotated_camera.h"
 
@@ -782,56 +786,93 @@ void FrogPilotAnnotatedCameraWidget::paintRoadName(QPainter &p) {
 }
 
 void FrogPilotAnnotatedCameraWidget::paintSteeringTorqueWidget(QPainter &p, const cereal::CarControl::Reader &carControl) {
-  // sunnypilot-style steering torque gauge: a centered horizontal bar that
-  // fills from the middle toward the steering direction, green -> amber ->
-  // red as the command approaches the EPS limit (|actuators.steer| = 1).
-  float steer = carControl.getActuators().getSteer();
+  // Faithful port of sunnypilot's TorqueBar (selfdrive/ui/mici/onroad/
+  // torque_bar.py) to QPainter: a curved arc centered at the bottom of the
+  // screen that fills from the middle toward the steering direction, thickens
+  // and blends white -> yellow/orange as the command approaches the EPS limit
+  // (|actuators.steer| = 1), with a gray dot in the center below 50% usage.
+  // Positioned above the road name widget.
+  constexpr float SCALE = 3.0f;
+  constexpr float ANGLE_SPAN = 12.7f;  // degrees, matches TORQUE_ANGLE_SPAN
+  constexpr float FILTER_DT = 1.0f / UI_FREQ;
+  constexpr float FILTER_RC = 0.1f;
+  constexpr float FILTER_ALPHA = FILTER_DT / (FILTER_RC + FILTER_DT);
+  constexpr float ROAD_NAME_CLEARANCE = 60.0f;
 
-  static float smoothedSteer = 0.0f;
-  smoothedSteer = 0.25f * steer + 0.75f * smoothedSteer;
+  bool active = carControl.getLatActive();
+  float target = -carControl.getActuators().getSteer();
 
-  float magnitude = std::min(std::abs(smoothedSteer), 1.0f);
+  static float torqueX = 0.0f;
+  static float alphaX = 0.0f;
+  torqueX += FILTER_ALPHA * (target - torqueX);
+  alphaX += FILTER_ALPHA * ((active ? 1.0f : 0.0f) - alphaX);
+
+  if (alphaX < 0.01f) {
+    return;
+  }
+
+  auto lerp = [](float v, float x0, float x1, float y0, float y1) {
+    float t = std::clamp((v - x0) / (x1 - x0), 0.0f, 1.0f);
+    return y0 + t * (y1 - y0);
+  };
+
+  float ax = std::min(std::abs(torqueX), 1.0f);
+  float lineOffset = lerp(ax, 0.5f, 1.0f, 22.0f * SCALE, 26.0f * SCALE) + ROAD_NAME_CLEARANCE;
+  float lineHeight = lerp(ax, 0.5f, 1.0f, 14.0f * SCALE, 56.0f * SCALE);
+  float lineRadius = 1200.0f * SCALE;
+  float midR = lineRadius + lineHeight / 2.0f;
+
+  float cx = width() / 2.0f + 8.0f;
+  float cy = rect().bottom() + lineRadius - lineOffset;
+  QRectF circle(cx - midR, cy - midR, 2.0f * midR, 2.0f * midR);
 
   p.save();
+  p.setBrush(Qt::NoBrush);
 
-  int barWidth = 600;
-  int barHeight = 34;
-  int x = (width() - barWidth) / 2;
-  int y = rect().bottom() - 130;
+  // background arc
+  float bgAlpha = active ? lerp(ax, 0.5f, 1.0f, 0.25f, 0.5f) : 0.15f;
+  QPen bgPen(QColor(255, 255, 255, int(255 * bgAlpha * alphaX)), lineHeight, Qt::SolidLine, Qt::RoundCap);
+  p.setPen(bgPen);
+  float bgSpan = alphaX * ANGLE_SPAN;
+  // Qt angles: 1/16 deg, 0 at 3 o'clock, positive counter-clockwise on screen
+  p.drawArc(circle, int((90.0f - bgSpan / 2.0f) * 16.0f), int(bgSpan * 16.0f));
 
-  QRect bgRect(x, y, barWidth, barHeight);
-  p.setPen(Qt::NoPen);
-  p.setBrush(blackColor(166));
-  p.drawRoundedRect(bgRect, barHeight / 2, barHeight / 2);
+  // active fill arc: sweeps from the top center toward the steering direction.
+  // Positive torqueX (= steering right on screen) sweeps clockwise from 90.
+  float fillSweep = -(bgSpan / 2.0f) * torqueX;
+  if (std::abs(fillSweep) > 0.05f) {
+    // fade to yellow/orange as we approach max torque, like the original
+    float blend = std::clamp((ax - 0.75f) * 4.0f, 0.0f, 1.0f);
+    auto mix = [&](const QColor &a, const QColor &b) {
+      return QColor(int(a.red() + (b.red() - a.red()) * blend),
+                    int(a.green() + (b.green() - a.green()) * blend),
+                    int(a.blue() + (b.blue() - a.blue()) * blend),
+                    int((a.alpha() + (b.alpha() - a.alpha()) * blend) * alphaX));
+    };
+    QColor startColor = mix(QColor(255, 255, 255, 230), QColor(255, 200, 0, 255));
+    QColor endColor = mix(QColor(255, 255, 255, 230), QColor(255, 115, 0, 255));
+    if (!active) {
+      startColor = endColor = QColor(255, 255, 255, int(255 * 0.35f * alphaX));
+    }
 
-  QColor fillColor;
-  if (magnitude < 0.5f) {
-    fillColor = QColor(0, 220, 110, 230);
-  } else if (magnitude < 0.8f) {
-    fillColor = QColor(255, 190, 0, 230);
-  } else {
-    fillColor = QColor(255, 60, 60, 240);
+    float fillEndX = torqueX > 0.0f ? cx + midR * std::sin(qDegreesToRadians(std::abs(fillSweep)))
+                                    : cx - midR * std::sin(qDegreesToRadians(std::abs(fillSweep)));
+    QLinearGradient gradient(QPointF(cx, 0), QPointF(fillEndX, 0));
+    gradient.setColorAt(0.0, startColor);
+    gradient.setColorAt(1.0, endColor);
+
+    QPen fillPen(QBrush(gradient), lineHeight, Qt::SolidLine, Qt::RoundCap);
+    p.setPen(fillPen);
+    p.drawArc(circle, int(90.0f * 16.0f), int(fillSweep * 16.0f));
   }
 
-  int centerX = x + barWidth / 2;
-  int halfSpan = barWidth / 2 - 8;
-  int fillLength = int(halfSpan * magnitude);
-  QRect fillRect;
-  if (smoothedSteer > 0.0f) {
-    // positive actuators.steer = steering left; fill toward the left
-    fillRect = QRect(centerX - fillLength, y + 7, fillLength, barHeight - 14);
-  } else {
-    fillRect = QRect(centerX, y + 7, fillLength, barHeight - 14);
+  // center dot below 50% usage
+  if (ax < 0.5f) {
+    float dotY = rect().bottom() - lineOffset - lineHeight / 2.0f;
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(182, 182, 182, int(255 * 0.9f * alphaX)));
+    p.drawEllipse(QPointF(cx, dotY), 5.0f * SCALE / 2.0f, 5.0f * SCALE / 2.0f);
   }
-  p.setBrush(fillColor);
-  p.drawRoundedRect(fillRect, (barHeight - 14) / 2, (barHeight - 14) / 2);
-
-  p.setPen(QPen(whiteColor(200), 3));
-  p.drawLine(centerX, y + 5, centerX, y + barHeight - 5);
-
-  p.setFont(InterFont(26, QFont::DemiBold));
-  p.setPen(QPen(whiteColor(), 4));
-  p.drawText(QRect(x, y - 36, barWidth, 32), Qt::AlignCenter, QString("%1%").arg(qRound(magnitude * 100.0f)));
 
   p.restore();
 }
