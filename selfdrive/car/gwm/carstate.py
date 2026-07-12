@@ -98,7 +98,11 @@ class CarState(CarStateBase):
 
     ret.steeringTorque = cp.vl["RX_STEER_RELATED"]["B_RX_DRIVER_TORQUE"]
     ret.steeringTorqueEps = cp.vl["RX_STEER_RELATED"]["B_RX_EPS_TORQUE"]
-    ret.steeringPressed = abs(ret.steeringTorque) > 50
+    # Debounced (same helper the ford port uses): the raw > 50 comparison
+    # chattered with a hand resting on the wheel at highway speed - 700 km trip
+    # qlogs show bursts of 10+ steeringPressed rising edges within a second at
+    # 130 km/h, each one a momentary steer override degrading lateral control.
+    ret.steeringPressed = self.update_steering_pressed(abs(ret.steeringTorque) > 50, 5)
 
     ret.doorOpen = any([cp.vl["DOOR_DRIVER"]["DOOR_REAR_RIGHT_OPEN"],
                         cp.vl["DOOR_DRIVER"]["DOOR_FRONT_RIGHT_OPEN"],
