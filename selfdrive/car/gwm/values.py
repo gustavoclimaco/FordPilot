@@ -10,10 +10,13 @@ from openpilot.selfdrive.car.fw_query_definitions import FwQueryConfig, Request,
 Ecu = car.CarParams.Ecu
 
 
-# Steer torque / longitudinal limits (mirrors opendbc/safety/modes/safety_gwm.h)
+# Steer torque / longitudinal limits (mirrors panda/board/safety/safety_gwm.h)
 class CarControllerParams:
   STEER_STEP = 2
-  STEER_MAX = 253
+  # 253 (original port) capped lateral accel at ~1.26 m/s^2 (live torqued data,
+  # 700 km trip 2026-07-09/10) - saturating in ordinary curves. The CAN field is
+  # 10-bit signed (+-511); raised in steps, keeping the same absolute ramp rates.
+  STEER_MAX = 350
   STEER_DELTA_UP = 4
   STEER_DELTA_DOWN = 6
   STEER_ERROR_MAX = 80
