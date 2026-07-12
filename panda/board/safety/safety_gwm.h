@@ -126,9 +126,10 @@ static void gwm_rx_hook(const CANPacket_t *msg) {
 static bool gwm_tx_hook(const CANPacket_t *msg) {
   const SteeringLimits GWM_STEERING_LIMITS = {
     // raised from 253 together with CarControllerParams.STEER_MAX: the old cap
-    // limited lateral accel to ~1.26 m/s^2 (live torqued data), saturating in
-    // ordinary curves. Ramp rates unchanged (same absolute Nm/s as before).
-    .max_steer = 350,
+    // limited lateral accel to ~1.26 m/s^2 (live torqued data), saturating and
+    // leaving the lane in ordinary curves (episodes requested 2.15-3.28 m/s^2).
+    // Ramp rates unchanged (same absolute Nm/s as before).
+    .max_steer = 450,
     .max_rate_up = 4,
     .max_rate_down = 6,
     .max_torque_error = 80,

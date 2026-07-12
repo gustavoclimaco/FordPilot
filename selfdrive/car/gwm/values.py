@@ -14,9 +14,13 @@ Ecu = car.CarParams.Ecu
 class CarControllerParams:
   STEER_STEP = 2
   # 253 (original port) capped lateral accel at ~1.26 m/s^2 (live torqued data,
-  # 700 km trip 2026-07-09/10) - saturating in ordinary curves. The CAN field is
-  # 10-bit signed (+-511); raised in steps, keeping the same absolute ramp rates.
-  STEER_MAX = 350
+  # 700 km trip 2026-07-09/10) - saturating and LEAVING THE LANE in ordinary
+  # curves. Saturated curve episodes on that trip requested 2.15-3.28 m/s^2, so
+  # 450 (~2.24 m/s^2 projected) covers most of them. The CAN field is 10-bit
+  # signed (+-511). Ramp rates kept unchanged (same absolute Nm/s as the
+  # original port); if the EPS internally clips below this, the isEPSobeying
+  # watchdog surfaces it as steerTempUnavailable.
+  STEER_MAX = 450
   STEER_DELTA_UP = 4
   STEER_DELTA_DOWN = 6
   STEER_ERROR_MAX = 80
