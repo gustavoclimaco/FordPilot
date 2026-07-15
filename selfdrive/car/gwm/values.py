@@ -13,14 +13,14 @@ Ecu = car.CarParams.Ecu
 # Steer torque / longitudinal limits (mirrors panda/board/safety/safety_gwm.h)
 class CarControllerParams:
   STEER_STEP = 2
-  # 253 (original port) capped lateral accel at ~1.26 m/s^2 (live torqued data,
-  # 700 km trip 2026-07-09/10) - saturating and LEAVING THE LANE in ordinary
-  # curves. Saturated curve episodes on that trip requested 2.15-3.28 m/s^2, so
-  # 450 (~2.24 m/s^2 projected) covers most of them. The CAN field is 10-bit
-  # signed (+-511). Ramp rates kept unchanged (same absolute Nm/s as the
-  # original port); if the EPS internally clips below this, the isEPSobeying
-  # watchdog surfaces it as steerTempUnavailable.
-  STEER_MAX = 450
+  # SAFETY: kept at 253 (the value validated over a 700 km trip with graceful
+  # degradation). Raising it to 450 caused the EPS to REJECT the steer request
+  # in hard curves and RELEASE the wheel mid-corner at 90-130 km/h (route
+  # 00000074--940e632241, 3 events: A_RX_STEER_REQUESTED -> 0, EPS torque -> 0,
+  # steerFaultTemporary latched after 1 s, lateral disengaged). The GWM EPS
+  # will not accept sustained commands this high; do not raise this cap without
+  # on-road evidence that the EPS keeps obeying at the new value.
+  STEER_MAX = 253
   STEER_DELTA_UP = 4
   STEER_DELTA_DOWN = 6
   STEER_ERROR_MAX = 80
