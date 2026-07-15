@@ -13,14 +13,16 @@ Ecu = car.CarParams.Ecu
 # Steer torque / longitudinal limits (mirrors panda/board/safety/safety_gwm.h)
 class CarControllerParams:
   STEER_STEP = 2
-  # SAFETY: kept at 253 (the value validated over a 700 km trip with graceful
-  # degradation). Raising it to 450 caused the EPS to REJECT the steer request
-  # in hard curves and RELEASE the wheel mid-corner at 90-130 km/h (route
-  # 00000074--940e632241, 3 events: A_RX_STEER_REQUESTED -> 0, EPS torque -> 0,
-  # steerFaultTemporary latched after 1 s, lateral disengaged). The GWM EPS
-  # will not accept sustained commands this high; do not raise this cap without
-  # on-road evidence that the EPS keeps obeying at the new value.
-  STEER_MAX = 253
+  # SAFETY-BOUNDED CEILING. Raw-CAN analysis of route 00000074--940e632241
+  # (8 segments) measured the exact TORQUE_CMD at which the EPS stops obeying
+  # (A_RX_STEER_REQUESTED -> 0, which the watchdog turns into a mid-curve
+  # lateral drop). The EPS refused at commands of 272 / 295 / 300 / 359 / 361
+  # / 378 across segments; the LOWEST refusal (weakest link) was 272. Set the
+  # cap 5% below that floor: round(272 * 0.95) = 258. This is above the 700 km
+  # value (253) yet stays clear of the refusal boundary. Do NOT raise further
+  # without new raw-CAN evidence of a higher reliable-obey floor - the EPS
+  # simply does not accept much more torque than this.
+  STEER_MAX = 258
   STEER_DELTA_UP = 4
   STEER_DELTA_DOWN = 6
   STEER_ERROR_MAX = 80
