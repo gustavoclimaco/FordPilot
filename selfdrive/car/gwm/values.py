@@ -13,16 +13,18 @@ Ecu = car.CarParams.Ecu
 # Steer torque / longitudinal limits (mirrors panda/board/safety/safety_gwm.h)
 class CarControllerParams:
   STEER_STEP = 2
-  # SAFETY-BOUNDED CEILING. Raw-CAN analysis of route 00000074--940e632241
-  # (8 segments) measured the exact TORQUE_CMD at which the EPS stops obeying
-  # (A_RX_STEER_REQUESTED -> 0, which the watchdog turns into a mid-curve
-  # lateral drop). The EPS refused at commands of 272 / 295 / 300 / 359 / 361
-  # / 378 across segments; the LOWEST refusal (weakest link) was 272. Set the
-  # cap 5% below that floor: round(272 * 0.95) = 258. This is above the 700 km
-  # value (253) yet stays clear of the refusal boundary. Do NOT raise further
-  # without new raw-CAN evidence of a higher reliable-obey floor - the EPS
-  # simply does not accept much more torque than this.
-  STEER_MAX = 258
+  # SAFETY: 253, the value validated over the original 700 km trip with graceful
+  # degradation (understeer/saturation, never a wheel release). Raw-CAN analysis
+  # of a later 700 km trip at 258 (route 0000007d--d44030cafa, seg 174 ~14:30)
+  # showed the EPS latch its own EPS_FAULT_PERMANENT flag while openpilot was
+  # commanding max torque (258) AND the driver was turning the wheel against it
+  # (steerOverride) at 107 km/h in a curve. Once the EPS latches that permanent
+  # fault it stops steering entirely (only longitudinal remains) until the
+  # ignition is cycled - the "atypical" total lateral loss reported on that trip.
+  # The EPS refusal / permanent-fault threshold is the hard limit here; do NOT
+  # raise this cap. More curve authority must come from the EPS side (see the
+  # port notes), not from commanding more torque than the EPS tolerates.
+  STEER_MAX = 253
   STEER_DELTA_UP = 4
   STEER_DELTA_DOWN = 6
   STEER_ERROR_MAX = 80

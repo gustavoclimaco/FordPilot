@@ -125,10 +125,10 @@ static void gwm_rx_hook(const CANPacket_t *msg) {
 
 static bool gwm_tx_hook(const CANPacket_t *msg) {
   const SteeringLimits GWM_STEERING_LIMITS = {
-    // 5% below the lowest observed EPS-refusal command (272) from raw-CAN
-    // analysis of route 00000074--940e632241. Must match
-    // CarControllerParams.STEER_MAX. See values.py for the full derivation.
-    .max_steer = 258,
+    // 253: validated over the original 700 km trip. Higher caps drove the EPS
+    // into its own EPS_FAULT_PERMANENT latch mid-curve (see values.py). Must
+    // match CarControllerParams.STEER_MAX.
+    .max_steer = 253,
     .max_rate_up = 4,
     .max_rate_down = 6,
     .max_torque_error = 80,
