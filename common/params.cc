@@ -276,6 +276,7 @@ std::unordered_map<std::string, uint32_t> keys = {
     {"ConditionalExperimental", PERSISTENT},
     {"CurvatureData", PERSISTENT | DONT_LOG},
     {"CurveSpeedController", PERSISTENT},
+    {"CurveTargetLatAccel", PERSISTENT},
     {"CustomAlerts", PERSISTENT},
     {"CustomColors", PERSISTENT},
     {"CustomCruise", PERSISTENT},
