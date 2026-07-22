@@ -217,6 +217,7 @@ frogpilot_default_params: list[tuple[str, str | bytes, int, str]] = [
   ("ConditionalExperimental", "1", 1, "0"),
   ("CurvatureData", "", 2, ""),
   ("CurveSpeedController", "1", 1, "0"),
+  ("CurveTargetLatAccel", "1.25", 2, "1.25"),
   ("CustomAlerts", "0", 0, "0"),
   ("CustomColors", "frog", 0, "stock"),
   ("CustomCruise", "1", 2, "1"),
@@ -717,6 +718,13 @@ class FrogPilotVariables:
     toggle.cem_status = toggle.conditional_experimental_mode and (params.get_bool("ShowCEMStatus") if toggle.tuning_level >= level["ShowCEMStatus"] else default.get_bool("ShowCEMStatus")) or toggle.debug_mode
 
     toggle.curve_speed_controller = toggle.openpilot_longitudinal and (params.get_bool("CurveSpeedController") if toggle.tuning_level >= level["CurveSpeedController"] else default.get_bool("CurveSpeedController"))
+    # Manual target lateral acceleration for the curve speed controller. Replaces
+    # the auto-learned value so the car slows only enough to hold this g in curves
+    # (higher = faster cornering / less slowing). Clipped to a safe band: the GWM
+    # EPS delivers ~1.3 m/s^2 max before saturating and risking a mid-curve fault,
+    # so the top of the range stays at 1.5 and the default sits at the 1.25 sweet
+    # spot. 0 keeps the original auto-learned behaviour.
+    toggle.curve_target_lat_accel = float(np.clip(params.get_float("CurveTargetLatAccel"), 0.0, 1.5)) if toggle.curve_speed_controller and toggle.tuning_level >= level["CurveTargetLatAccel"] else default.get_float("CurveTargetLatAccel")
     toggle.csc_status = toggle.curve_speed_controller and (params.get_bool("ShowCSCStatus") if toggle.tuning_level >= level["ShowCSCStatus"] else default.get_bool("ShowCSCStatus")) or toggle.debug_mode
 
     toggle.custom_alerts = params.get_bool("CustomAlerts") if toggle.tuning_level >= level["CustomAlerts"] else default.get_bool("CustomAlerts")

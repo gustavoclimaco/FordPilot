@@ -99,7 +99,8 @@ FrogPilotLongitudinalPanel::FrogPilotLongitudinalPanel(FrogPilotSettingsWindow *
     {"ShowCEMStatus", tr("Status Widget"), tr("<b>Show which condition triggered \"Experimental Mode\"</b> on the driving screen."), ""},
 
     {"CurveSpeedController", tr("Curve Speed Controller"), tr("<b>Automatically slow down for upcoming curves</b> using data learned from your driving style, adapting to curves as you would."), "../../frogpilot/assets/toggle_icons/icon_speed_map.png"},
-    {"CalibratedLateralAcceleration", tr("Calibrated Lateral Acceleration"), tr("<b>The learned lateral acceleration from collected driving data.</b> This sets how fast openpilot will take curves. Higher values allow faster cornering; lower values slow the vehicle for gentler turns."), ""},
+    {"CurveTargetLatAccel", tr("Target Lateral Acceleration"), tr("<b>The lateral acceleration openpilot aims to hold through curves.</b> The car slows only enough to keep this g-force, so higher values mean faster cornering (less slowing) and lower values mean gentler, slower curves.<br><br><b>Safety:</b> keep this at or below what your steering can physically deliver. On the GWM Haval the EPS tops out around 1.3 m/s²; pushing beyond that saturates the steering and can fault it mid-curve, so the default 1.25 is the recommended sweet spot."), ""},
+    {"CalibratedLateralAcceleration", tr("Calibrated Lateral Acceleration"), tr("<b>The learned lateral acceleration from collected driving data.</b> Shown for reference; \"Target Lateral Acceleration\" above is what actually controls curve speed."), ""},
     {"CalibrationProgress", tr("Calibration Progress"), tr("<b>How much curve data has been collected.</b> This is a progress meter; it is normal for the value to stay low and rarely reach 100%."), ""},
     {"ResetCurveData", tr("Reset Curve Data"), tr("<b>Reset collected user data for \"Curve Speed Controller\".</b>"), ""},
     {"ShowCSCStatus", tr("Status Widget"), tr("<b>Show the \"Curve Speed Controller\" target speed on the driving screen.</b>"), ""},
@@ -272,6 +273,8 @@ FrogPilotLongitudinalPanel::FrogPilotLongitudinalPanel(FrogPilotSettingsWindow *
         longitudinalLayout->setCurrentWidget(curveSpeedPanel);
       });
       longitudinalToggle = curveControlToggle;
+    } else if (param == "CurveTargetLatAccel") {
+      longitudinalToggle = new FrogPilotParamValueControl(param, title, desc, icon, 0.75, 1.5, tr(" m/s²"), std::map<float, QString>(), 0.05);
     } else if (param == "CalibrationProgress") {
       calibrationProgressLabel = new LabelControl(title, QString::number(params.getFloat("CalibrationProgress"), 'f', 2) + "%", desc);
       longitudinalToggle = calibrationProgressLabel;
